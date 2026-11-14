@@ -1,0 +1,8 @@
+aiohttp>=3.9,<4.0
+aiodns
+aiohttp-socks
+Pillow
+pywebview>=5.0
+truststore
+yarl
+pywin32; sys_platform == "win32"

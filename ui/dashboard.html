@@ -1,0 +1,3658 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TwitchMultiMiner</title>
+  <!-- Design language adapted with Graphite surface discipline (CC-BY-4.0) -->
+  <style>
+    :root {
+      --bg-sidebar: #0f0f10;
+      --bg-canvas: #141415;
+      --bg-card: #19191b;
+      --bg-raised: #232325;
+      --bg-hover: #1e1e21;
+      --bg-input: #121213;
+
+      --border: rgba(237, 237, 237, 0.08);
+      --border-strong: rgba(237, 237, 237, 0.14);
+      --border-focus: rgba(237, 237, 237, 0.32);
+
+      --text: #ededed;
+      --text-muted: #a1a1a6;
+      --text-faint: #85858b;
+
+      --accent: #ededed;
+      --accent-ink: #0f0f10;
+
+      --ok: #4cc38a;
+      --ok-bg: rgba(76, 195, 138, 0.12);
+      --warn: #d99b26;
+      --warn-bg: rgba(217, 155, 38, 0.12);
+      --danger: #e5484d;
+      --danger-bg: rgba(229, 72, 77, 0.12);
+      --info: #6aa9e9;
+      --info-bg: rgba(106, 169, 233, 0.12);
+
+      --r-lg: 12px;
+      --r-md: 8px;
+      --r-sm: 6px;
+
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+      --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+      --font-mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-canvas);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 13.5px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    input, textarea, select, pre, code, .selectable {
+      user-select: text;
+    }
+
+    .num {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(237, 237, 237, 0.12);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(237, 237, 237, 0.22);
+    }
+
+    /* App Shell */
+    .shell {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 16px 12px;
+      gap: 20px;
+      min-height: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 4px 8px;
+    }
+
+    .brand-mark {
+      width: 32px;
+      height: 32px;
+      border-radius: var(--r-md);
+      background: var(--bg-raised);
+      border: 1px solid var(--border-strong);
+      display: grid;
+      place-items: center;
+      color: var(--text);
+      flex-shrink: 0;
+    }
+
+    .brand-title {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      line-height: 1.2;
+    }
+
+    .brand-sub {
+      font-size: 11.5px;
+      color: var(--text-faint);
+      margin-top: 2px;
+    }
+
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .nav-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      width: 100%;
+      height: 36px;
+      padding: 0 10px;
+      border-radius: var(--r-md);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 140ms var(--ease), color 140ms var(--ease), border-color 140ms var(--ease);
+      text-align: left;
+    }
+
+    .nav-btn:hover {
+      background: var(--bg-card);
+      color: var(--text);
+    }
+
+    .nav-btn.active {
+      background: var(--bg-raised);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    .nav-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .nav-badge {
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-muted);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 1px 6px;
+      min-width: 22px;
+      text-align: center;
+    }
+
+    .nav-btn.active .nav-badge {
+      background: var(--bg-sidebar);
+      color: var(--text);
+    }
+
+    .sidebar-spacer {
+      flex: 1;
+    }
+
+    .sidebar-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .sidebar-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .sidebar-row strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    /* Main Column */
+    .main-col {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      background: var(--bg-canvas);
+    }
+
+    .topbar {
+      height: 56px;
+      min-height: 56px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--bg-canvas);
+    }
+
+    .topbar-head {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .topbar-title {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .topbar-sub {
+      font-size: 12px;
+      color: var(--text-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .workspace {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 24px;
+    }
+
+    .view {
+      display: none;
+      flex-direction: column;
+      gap: 20px;
+      max-width: 1520px;
+      margin: 0 auto;
+    }
+
+    .view.active {
+      display: flex;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      height: 32px;
+      padding: 0 12px;
+      border-radius: var(--r-md);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background-color 140ms var(--ease), border-color 140ms var(--ease), color 140ms var(--ease), transform 120ms var(--ease);
+    }
+
+    .btn:hover:not(:disabled) {
+      background: var(--bg-raised);
+      border-color: var(--border-strong);
+    }
+
+    .btn:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #d8d8db;
+      border-color: #d8d8db;
+      color: var(--accent-ink);
+    }
+
+    .btn-danger {
+      color: var(--danger);
+      border-color: rgba(229, 72, 77, 0.28);
+      background: var(--danger-bg);
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background: rgba(229, 72, 77, 0.2);
+      border-color: rgba(229, 72, 77, 0.45);
+    }
+
+    .btn-ghost {
+      background: transparent;
+      border-color: transparent;
+      color: var(--text-muted);
+    }
+
+    .btn-ghost:hover:not(:disabled) {
+      background: var(--bg-raised);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    .btn-icon {
+      width: 32px;
+      padding: 0;
+    }
+
+    .btn-sm {
+      height: 28px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
+
+    .btn-sm.btn-icon {
+      width: 28px;
+      padding: 0;
+    }
+
+    /* Inputs */
+    .input, .textarea, .select {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 13px;
+      padding: 7px 10px;
+      outline: none;
+      transition: border-color 140ms var(--ease);
+    }
+
+    .input, .select {
+      height: 34px;
+    }
+
+    .select {
+      padding-top: 0;
+      padding-bottom: 0;
+      line-height: 1.2;
+    }
+
+    .textarea {
+      min-height: 58px;
+      resize: vertical;
+      line-height: 1.45;
+    }
+
+    .input:focus, .textarea:focus, .select:focus {
+      border-color: var(--border-focus);
+    }
+
+    .input::placeholder, .textarea::placeholder {
+      color: var(--text-faint);
+    }
+
+    /* Cards & Surfaces */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--text-faint);
+      margin-top: 2px;
+    }
+
+    .card-body {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* KPI Strip */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .kpi-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .kpi-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12.5px;
+      color: var(--text-muted);
+    }
+
+    .kpi-value {
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+      line-height: 1.15;
+    }
+
+    .kpi-meta {
+      font-size: 12px;
+      color: var(--text-faint);
+    }
+
+    /* Status dot + badge */
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--text-faint);
+    }
+    .dot.ok { background: var(--ok); }
+    .dot.warn { background: var(--warn); }
+    .dot.danger { background: var(--danger); }
+    .dot.info { background: var(--info); }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 8px;
+      border-radius: var(--r-sm);
+      border: 1px solid var(--border);
+      background: var(--bg-raised);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .pill.ok {
+      color: var(--ok);
+      background: var(--ok-bg);
+      border-color: rgba(76, 195, 138, 0.25);
+    }
+    .pill.warn {
+      color: var(--warn);
+      background: var(--warn-bg);
+      border-color: rgba(217, 155, 38, 0.25);
+    }
+    .pill.danger {
+      color: var(--danger);
+      background: var(--danger-bg);
+      border-color: rgba(229, 72, 77, 0.25);
+    }
+    .pill.info {
+      color: var(--info);
+      background: var(--info-bg);
+      border-color: rgba(106, 169, 233, 0.25);
+    }
+
+    /* Accounts Split Pane */
+    .accounts-split {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) 396px;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .matrix-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .search-wrap {
+      position: relative;
+      width: 220px;
+    }
+
+    .search-wrap svg {
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-faint);
+      pointer-events: none;
+    }
+
+    .search-wrap .input {
+      padding-left: 32px;
+      height: 30px;
+      font-size: 12.5px;
+    }
+
+    .account-list {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .account-head-row,
+    .account-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) 104px minmax(0, 1.25fr) minmax(96px, 0.9fr) 32px;
+      align-items: center;
+      gap: 10px;
+      padding: 0 18px;
+      min-width: 0;
+    }
+
+    .account-head-row {
+      height: 34px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-faint);
+      font-weight: 500;
+    }
+
+    .account-row {
+      min-height: 60px;
+      padding-top: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background-color 140ms var(--ease);
+    }
+
+    .account-row:last-child {
+      border-bottom: none;
+    }
+
+    .account-row:hover {
+      background: var(--bg-hover);
+    }
+
+    .account-row.selected {
+      background: var(--bg-raised);
+    }
+
+    .cell-main {
+      min-width: 0;
+    }
+
+    .cell-title {
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cell-sub {
+      font-size: 12px;
+      color: var(--text-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 5px;
+      height: 18px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg-canvas);
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Progress */
+    .progress-col {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .progress-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      min-width: 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .progress-meta span:last-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .progress-track {
+      height: 6px;
+      width: 100%;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: var(--r-sm);
+      transition: width 180ms var(--ease);
+    }
+
+    .progress-fill.ok { background: var(--ok); }
+    .progress-fill.warn { background: var(--warn); }
+    .progress-fill.info { background: var(--info); }
+
+    .row-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    /* Inspector */
+    .inspector-section {
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 6px 12px;
+      font-size: 12.5px;
+    }
+
+    .kv-k {
+      color: var(--text-faint);
+    }
+
+    .kv-v {
+      color: var(--text);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Hardware Keycap Strip for Twitch Activation Code */
+    .keycap-box {
+      background: var(--bg-canvas);
+      border: 1px solid rgba(217, 155, 38, 0.35);
+      border-radius: var(--r-md);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .keycap-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .keycap {
+      width: 32px;
+      height: 36px;
+      border-radius: var(--r-md);
+      background: var(--bg-raised);
+      border: 1px solid var(--border-strong);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      display: grid;
+      place-items: center;
+      font-family: var(--font-mono);
+      font-size: 15px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+
+    .inline-form {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .confirm-strip {
+      background: var(--danger-bg);
+      border: 1px solid rgba(229, 72, 77, 0.35);
+      border-radius: var(--r-md);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12.5px;
+    }
+
+    .log-box {
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 10px 12px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.5;
+      color: var(--text-muted);
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .log-box.compact {
+      height: 180px;
+    }
+
+    .log-box.full {
+      height: calc(100vh - 220px);
+      min-height: 320px;
+    }
+
+    .log-line-err { color: var(--danger); }
+    .log-line-warn { color: var(--warn); }
+    .log-line-ok { color: var(--ok); }
+
+    /* Radar & Settings Grid */
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .field-label {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .field-hint {
+      font-size: 11.5px;
+      color: var(--text-faint);
+      font-weight: 400;
+    }
+
+    .fields-row-3 {
+      display: grid;
+      grid-template-columns: 1.25fr 1.15fr 0.75fr;
+      gap: 12px;
+    }
+
+    .checks-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: var(--r-md);
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      font-size: 12.5px;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .check-item input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: var(--r-sm);
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    /* Tables */
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+
+    .data-table th {
+      text-align: left;
+      font-weight: 500;
+      color: var(--text-faint);
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .data-table td {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      vertical-align: middle;
+    }
+
+    .data-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    /* Campaigns grid */
+    .campaigns-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 12px;
+    }
+
+    .campaign-card {
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color 140ms var(--ease);
+    }
+
+    .campaign-card.is-fav {
+      border-color: rgba(217, 155, 38, 0.45);
+    }
+
+    .campaign-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .btn-fav {
+      width: 28px;
+      height: 28px;
+      border-radius: var(--r-sm);
+      border: 1px solid var(--border);
+      background: var(--bg-raised);
+      color: var(--text-faint);
+      display: inline-grid;
+      place-items: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      padding: 0;
+      transition: color 140ms var(--ease), background-color 140ms var(--ease), border-color 140ms var(--ease);
+    }
+
+    .btn-fav:hover {
+      color: var(--text);
+      border-color: var(--border-strong);
+    }
+
+    .btn-fav.active,
+    .btn-filter-fav.active {
+      color: var(--warn);
+      background: var(--warn-bg);
+      border-color: rgba(217, 155, 38, 0.35);
+    }
+
+    /* Radar presets */
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+      gap: 8px;
+    }
+
+    .preset-card {
+      text-align: left;
+      padding: 10px 12px;
+      border-radius: var(--r-md);
+      border: 1px solid var(--border);
+      background: var(--bg-canvas);
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      font-family: inherit;
+      transition: background-color 140ms var(--ease), border-color 140ms var(--ease);
+    }
+
+    .preset-card:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-strong);
+    }
+
+    .preset-card.active {
+      background: var(--bg-raised);
+      border-color: var(--border-focus);
+    }
+
+    .preset-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .preset-card-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.3;
+      min-width: 0;
+    }
+
+    .preset-card-sub {
+      font-size: 11px;
+      color: var(--text-faint);
+      line-height: 1.3;
+    }
+
+    .game-art {
+      width: 46px;
+      height: 62px;
+      border-radius: var(--r-sm);
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      flex-shrink: 0;
+      display: grid;
+      place-items: center;
+      color: var(--text-faint);
+    }
+
+    .game-art img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .drops-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    .drop-item {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: var(--r-md);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+      transition: background-color 140ms var(--ease), border-color 140ms var(--ease);
+    }
+
+    .drop-item:hover,
+    .drop-item:focus-visible {
+      background: var(--bg-raised);
+      border-color: var(--border-strong);
+      outline: none;
+    }
+
+    .drop-photos {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .drop-body {
+      flex: 1;
+      min-width: 150px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .drop-body-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .drop-name {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .drop-meta-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-faint);
+    }
+
+    .drop-progress-bar {
+      height: 4px;
+      width: 100%;
+      border-radius: 999px;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .drop-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 999px;
+      transition: width 180ms var(--ease);
+    }
+
+    .drop-progress-fill.ok {
+      background: var(--ok);
+    }
+
+    .item-thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: var(--r-sm);
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      flex-shrink: 0;
+      display: grid;
+      place-items: center;
+      color: var(--text-faint);
+      position: relative;
+    }
+
+    .item-thumb.sm {
+      width: 32px;
+      height: 32px;
+    }
+
+    .item-thumb.lg {
+      width: 72px;
+      height: 72px;
+      border-radius: var(--r-md);
+      background: var(--bg-canvas);
+    }
+
+    .item-thumb.clickable {
+      cursor: pointer;
+      transition: border-color 140ms var(--ease), background-color 140ms var(--ease);
+    }
+
+    .item-thumb.clickable:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-raised);
+    }
+
+    .item-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      padding: 3px;
+      display: block;
+      transition: transform 160ms var(--ease);
+    }
+
+    .item-thumb.lg img {
+      padding: 4px;
+    }
+
+    .drop-item:hover .item-thumb img {
+      transform: scale(1.04);
+    }
+
+    .thumb-fallback {
+      display: grid;
+      place-items: center;
+      color: var(--text-faint);
+    }
+
+    /* Item Preview Modal */
+    .modal-preview {
+      max-width: 540px;
+    }
+
+    .preview-stage {
+      height: 236px;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      position: relative;
+      cursor: zoom-in;
+      padding: 16px;
+    }
+
+    .preview-stage.zoomed {
+      cursor: zoom-out;
+    }
+
+    .preview-stage img {
+      max-width: 100%;
+      max-height: 200px;
+      object-fit: contain;
+      display: block;
+      transition: transform 180ms var(--ease);
+    }
+
+    .preview-stage.zoomed img {
+      transform: scale(1.7);
+    }
+
+    .preview-zoom-hint {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      padding: 2px 8px;
+      border-radius: var(--r-sm);
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-muted);
+      pointer-events: none;
+    }
+
+    .preview-thumbs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .preview-thumb-btn {
+      width: 52px;
+      height: 52px;
+      padding: 4px;
+      border-radius: var(--r-md);
+      border: 1px solid var(--border);
+      background: var(--bg-canvas);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      transition: border-color 140ms var(--ease), background-color 140ms var(--ease);
+    }
+
+    .preview-thumb-btn:hover {
+      background: var(--bg-raised);
+      border-color: var(--border-strong);
+    }
+
+    .preview-thumb-btn.active {
+      background: var(--bg-raised);
+      border-color: var(--text);
+    }
+
+    .preview-thumb-btn img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    .insp-target-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Empty state */
+    .empty-state {
+      padding: 40px 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 10px;
+      color: var(--text-muted);
+    }
+
+    .empty-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--r-md);
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      display: grid;
+      place-items: center;
+      color: var(--text-muted);
+    }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(9, 9, 10, 0.72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 40;
+      opacity: 0;
+      transition: opacity 160ms var(--ease);
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+      opacity: 1;
+    }
+
+    .modal {
+      width: 100%;
+      max-width: 440px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      transform: translateY(6px) scale(0.985);
+      transition: transform 180ms var(--ease);
+    }
+
+    .modal-backdrop.open .modal {
+      transform: translateY(0) scale(1);
+    }
+
+    .modal-foot {
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      background: var(--bg-sidebar);
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 60;
+      background: var(--bg-raised);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 160ms var(--ease), transform 160ms var(--ease);
+      max-width: 380px;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 1180px) {
+      .kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .accounts-split {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .two-col {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    @media (max-width: 860px) {
+      .shell {
+        grid-template-columns: 72px minmax(0, 1fr);
+      }
+      .brand-text, .nav-label, .nav-badge, .sidebar-panel, .sidebar-hide-label {
+        display: none;
+      }
+      .nav-btn {
+        justify-content: center;
+        padding: 0;
+      }
+      .account-head-row,
+      .account-row {
+        grid-template-columns: minmax(0, 1fr) 96px minmax(0, 1.1fr) minmax(88px, 0.85fr) 32px;
+        gap: 8px;
+        padding: 8px 12px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.5 5.5 18.5 9.5"/>
+            <path d="m12 8-7.5 7.5a2.12 2.12 0 0 0 3 3L15 11"/>
+            <path d="M7.5 4.5C11 3 16.5 4 19.5 7c3 3 4 8.5 2.5 12l-3.5-3.5"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title">TwitchMultiMiner</div>
+          <div class="brand-sub" id="appVersionSub">Фарм с нескольких профилей</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Разделы">
+        <button class="nav-btn active" data-view="accounts" type="button">
+          <span class="nav-left">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            <span class="nav-label">Аккаунты</span>
+          </span>
+          <span class="nav-badge num" id="navAccountsCount">0</span>
+        </button>
+
+        <button class="nav-btn" data-view="radar" type="button">
+          <span class="nav-left">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="2"/></svg>
+            <span class="nav-label">Радар и цели</span>
+          </span>
+          <span class="nav-badge num" id="navRadarCount">0</span>
+        </button>
+
+        <button class="nav-btn" data-view="campaigns" type="button">
+          <span class="nav-left">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2z"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>
+            <span class="nav-label">Кампании</span>
+          </span>
+          <span class="nav-badge num" id="navCampaignsCount">0</span>
+        </button>
+
+        <button class="nav-btn" data-view="logs" type="button">
+          <span class="nav-left">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+            <span class="nav-label">Журнал</span>
+          </span>
+          <span class="nav-badge num" id="navLogsCount">0</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+
+      <div class="sidebar-panel">
+        <div class="sidebar-row">
+          <span>Радар</span>
+          <strong class="num" id="sidebarRadarTime">—</strong>
+        </div>
+        <div class="sidebar-row">
+          <span>Трансляций live</span>
+          <strong class="num" id="sidebarLiveCount">0</strong>
+        </div>
+        <div class="sidebar-row">
+          <span>WebSocket</span>
+          <strong class="num" id="sidebarWsCount">0 / 0</strong>
+        </div>
+      </div>
+
+      <button class="btn" id="btnHideToTray" type="button" title="Скрыть окно в системный трей">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+        <span class="sidebar-hide-label">Свернуть в трей</span>
+      </button>
+    </aside>
+
+    <!-- Main Area -->
+    <div class="main-col">
+      <header class="topbar">
+        <div class="topbar-head">
+          <h1 class="topbar-title" id="topbarTitle">Аккаунты</h1>
+          <span class="topbar-sub" id="topbarSub">Состояние профилей, авторизация и прогресс фарма</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn" id="btnImportLegacy" type="button" title="Импортировать сессии из TwitchDropsMiner">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+            Импорт
+          </button>
+          <button class="btn" id="btnOpenAddModal" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            Добавить аккаунт
+          </button>
+          <button class="btn btn-danger" id="btnStopAll" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="12" height="12" x="6" y="6" rx="2"/></svg>
+            Остановить все
+          </button>
+          <button class="btn btn-primary" id="btnStartAll" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+            Запустить все
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <!-- VIEW 1: ACCOUNTS -->
+        <section class="view active" id="view-accounts">
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-label">
+                <span>Активные аккаунты</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+              </div>
+              <div class="kpi-value" id="kpiRunning">0 / 0</div>
+              <div class="kpi-meta" id="kpiRunningSub">Профили в ожидании</div>
+            </div>
+
+            <div class="kpi-card">
+              <div class="kpi-label">
+                <span>Воркеры в работе</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+              </div>
+              <div class="kpi-value" id="kpiMining">0</div>
+              <div class="kpi-meta" id="kpiMiningSub">Стендбай: 0</div>
+            </div>
+
+            <div class="kpi-card">
+              <div class="kpi-label">
+                <span>Собрано дропсов</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2z"/><path d="M12 22V7"/></svg>
+              </div>
+              <div class="kpi-value" id="kpiClaimed">0</div>
+              <div class="kpi-meta" id="kpiClaimedSub">Автоматический сбор включён</div>
+            </div>
+
+            <div class="kpi-card">
+              <div class="kpi-label">
+                <span>Сокеты и радар</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/></svg>
+              </div>
+              <div class="kpi-value" id="kpiSockets">0 / 0</div>
+              <div class="kpi-meta" id="kpiRadarSub">Опрос не выполнялся</div>
+            </div>
+          </div>
+
+          <div class="accounts-split">
+            <!-- Accounts Matrix -->
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <div class="card-title">Матрица профилей</div>
+                  <div class="card-sub">Выберите аккаунт для просмотра кода, прокси и локального лога</div>
+                </div>
+                <div class="matrix-toolbar">
+                  <div class="search-wrap">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    <input class="input" id="accountSearchInput" type="text" placeholder="Поиск профиля или игры" />
+                  </div>
+                </div>
+              </div>
+
+              <div class="account-head-row" id="accountHeadRow">
+                <div>Профиль</div>
+                <div>Статус</div>
+                <div>Канал и игра</div>
+                <div>Прогресс</div>
+                <div aria-hidden="true"></div>
+              </div>
+
+              <div class="account-list" id="accountListContainer"></div>
+            </div>
+
+            <!-- Right Inspector -->
+            <div class="card" id="inspectorCard">
+              <div class="card-header">
+                <div style="min-width:0">
+                  <div class="card-title" id="inspTitle">Профиль не выбран</div>
+                  <div class="card-sub" id="inspSub">Добавьте или выберите аккаунт слева</div>
+                </div>
+                <span class="pill" id="inspBadge" style="display:none">
+                  <span class="dot"></span>
+                  <span id="inspBadgeText">—</span>
+                </span>
+              </div>
+
+              <div class="card-body" id="inspectorBody">
+                <div class="empty-state" style="padding: 28px 12px;">
+                  <div class="empty-icon">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+                  </div>
+                  <div style="font-size:13px; color:var(--text);">Нет выбранного профиля</div>
+                  <div style="font-size:12px;">Нажмите на строку в таблице или добавьте новый аккаунт.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 2: RADAR & TARGETS -->
+        <section class="view" id="view-radar">
+          <div class="two-col">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <div class="card-title">Приоритеты и радар</div>
+                  <div class="card-sub">Общие правила для всех воркеров, включая GTA 6 и топ-стримеров</div>
+                </div>
+                <button class="btn btn-sm" id="btnPollRadarNow" type="button">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+                  Опросить сейчас
+                </button>
+              </div>
+              <div class="card-body">
+                <div class="field">
+                  <label class="field-label">
+                    <span>Пресеты радара</span>
+                    <span class="field-hint">Быстрая настройка очереди в 1 клик</span>
+                  </label>
+                  <div class="preset-grid" id="radarPresetsBar">
+                    <button class="preset-card" type="button" data-radar-preset="default" aria-pressed="false">
+                      <div class="preset-card-head">
+                        <span class="preset-card-title">Базовый (Топ и GTA 6)</span>
+                      </div>
+                      <div class="preset-card-sub">Хиты и топ-стримеры</div>
+                    </button>
+                    <button class="preset-card" type="button" data-radar-preset="all_campaigns" aria-pressed="false">
+                      <div class="preset-card-head">
+                        <span class="preset-card-title">Все доступные кампании</span>
+                        <span class="nav-badge num" id="presetAllCount">0</span>
+                      </div>
+                      <div class="preset-card-sub">Все игры с дропсами</div>
+                    </button>
+                    <button class="preset-card" type="button" data-radar-preset="pc_games" aria-pressed="false">
+                      <div class="preset-card-head">
+                        <span class="preset-card-title">Игры на ПК</span>
+                        <span class="nav-badge num" id="presetPcCount">0</span>
+                      </div>
+                      <div class="preset-card-sub">Установленные на ПК</div>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="setPinned">
+                    <span>Закреплённые стримеры</span>
+                    <span class="field-hint">Через запятую или с новой строки</span>
+                  </label>
+                  <textarea class="textarea mono" id="setPinned" placeholder="kaicenat, xqc, shroud, tarik"></textarea>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="setKeywords">
+                    <span>Авто-ключи для перехвата кампаний</span>
+                    <span class="field-hint">GTA, Grand Theft Auto VI, Rockstar</span>
+                  </label>
+                  <textarea class="textarea" id="setKeywords" placeholder="Grand Theft Auto, GTA, Rockstar"></textarea>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="setPriorityGames">
+                    <span>Игры первого приоритета</span>
+                    <span class="field-hint">Фармятся раньше остальных</span>
+                  </label>
+                  <textarea class="textarea" id="setPriorityGames" placeholder="Grand Theft Auto VI, VALORANT, Rust"></textarea>
+                </div>
+
+                <div class="field">
+                  <label class="field-label" for="setExcludeGames">
+                    <span>Исключённые игры</span>
+                    <span class="field-hint">Не запускать фарм</span>
+                  </label>
+                  <textarea class="textarea" id="setExcludeGames" style="min-height:56px" placeholder="Пусто — разрешены все"></textarea>
+                </div>
+
+                <div class="fields-row-3">
+                  <div class="field">
+                    <label class="field-label" for="setPriorityMode">Режим очереди</label>
+                    <select class="select" id="setPriorityMode">
+                      <option value="ENDING_SOONEST">Скоро завершаются</option>
+                      <option value="PRIORITY_ONLY">Только приоритет</option>
+                      <option value="LOW_AVBL_FIRST">Меньше запас</option>
+                    </select>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="setQuality">Качество потока</label>
+                    <select class="select" id="setQuality">
+                      <option value="1">1 — Минимальное</option>
+                      <option value="2">2 — Низкое</option>
+                      <option value="3">3 — Среднее</option>
+                      <option value="4">4 — Высокое</option>
+                      <option value="5">5 — Почти макс</option>
+                      <option value="6">6 — Лучшее</option>
+                    </select>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="setRadarInterval">Интервал (сек)</label>
+                    <input class="input num" id="setRadarInterval" type="number" min="30" max="600" step="5" value="120" />
+                  </div>
+                </div>
+
+                <div class="checks-grid">
+                  <label class="check-item">
+                    <input type="checkbox" id="setHybridSpade" />
+                    <span>Гибридный watch + Spade</span>
+                  </label>
+                  <label class="check-item">
+                    <input type="checkbox" id="setStandbyPinned" />
+                    <span>Стендбай на закреплённых</span>
+                  </label>
+                  <label class="check-item">
+                    <input type="checkbox" id="setBadgesEmotes" />
+                    <span>Бейджи и эмоции</span>
+                  </label>
+                  <label class="check-item">
+                    <input type="checkbox" id="setAvailableCheck" />
+                    <span>Проверять внешние дропсы</span>
+                  </label>
+                </div>
+
+                <div style="display:flex; justify-content:flex-end; gap:8px; padding-top:4px;">
+                  <button class="btn" id="btnResetSettings" type="button" style="display:none">Сбросить</button>
+                  <button class="btn btn-primary" id="btnSaveSettings" type="button">Сохранить настройки</button>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex; flex-direction:column; gap:16px;">
+              <div class="card">
+                <div class="card-header">
+                  <div>
+                    <div class="card-title">Авто-повышенные игры по ключам</div>
+                    <div class="card-sub">Категории, автоматически поднятые радаром выше обычной очереди</div>
+                  </div>
+                  <span class="pill num" id="radarLastPollPill">Опрос: —</span>
+                </div>
+                <div class="card-body">
+                  <div id="radarErrorBanner" class="confirm-strip" style="display:none;"></div>
+                  <div class="chip-list" id="autoPromotedChips">
+                    <span class="field-hint">Пока нет автоматически повышенных игр</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <div>
+                    <div class="card-title">Мониторинг закреплённых стримеров</div>
+                    <div class="card-sub">Обновление без лишних запросов от каждого аккаунта</div>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Стример</th>
+                        <th>Статус</th>
+                        <th>Категория</th>
+                        <th>Зрители</th>
+                        <th>Кампания дропсов</th>
+                      </tr>
+                    </thead>
+                    <tbody id="pinnedStreamsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 3: CAMPAIGNS & HISTORY -->
+        <section class="view" id="view-campaigns">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Активные и предстоящие кампании</div>
+                <div class="card-sub">Прогресс дропсов по выбранному или всем профилям</div>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <button class="btn btn-sm btn-filter-fav" id="btnCampaignFavOnly" type="button" title="Показать только избранные кампании">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                  <span>Избранные</span>
+                  <span class="nav-badge num" id="campaignFavCount">0</span>
+                </button>
+                <select class="select" id="campaignStatusFilter" style="width:146px; height:30px; font-size:12.5px;">
+                  <option value="all">Все статусы</option>
+                  <option value="favorites">Только избранные</option>
+                  <option value="active">Активные</option>
+                  <option value="in_progress">В процессе (&gt;0%)</option>
+                  <option value="upcoming">Предстоящие</option>
+                  <option value="finished">Завершённые</option>
+                  <option value="expired">Истекшие</option>
+                </select>
+                <select class="select" id="campaignSortSelect" style="width:176px; height:30px; font-size:12.5px;">
+                  <option value="fav_status">Избранные сверху</option>
+                  <option value="status">По статусу</option>
+                  <option value="progress_desc">По прогрессу (убыв.)</option>
+                  <option value="remaining_asc">По остатку времени</option>
+                  <option value="game_asc">По игре (А–Я)</option>
+                </select>
+                <select class="select" id="campaignAccountFilter" style="width:140px; height:30px; font-size:12.5px;">
+                  <option value="">Все аккаунты</option>
+                </select>
+                <div class="search-wrap" style="width:168px;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  <input class="input" id="campaignSearchInput" type="text" placeholder="Игра или кампания" />
+                </div>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="campaigns-grid" id="campaignsGrid"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">История полученных дропсов</div>
+                <div class="card-sub">Подтверждённые награды за текущую сессию</div>
+              </div>
+              <span class="pill num" id="historyCountPill">0 шт.</span>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Время</th>
+                    <th>Аккаунт</th>
+                    <th>Игра</th>
+                    <th>Кампания</th>
+                    <th>Предмет</th>
+                  </tr>
+                </thead>
+                <tbody id="historyTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 4: LOGS -->
+        <section class="view" id="view-logs">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Общий журнал оркестратора</div>
+                <div class="card-sub">События авторизации, радара, WebSocket и переключения каналов</div>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <div class="search-wrap" style="width:210px;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  <input class="input" id="logSearchInput" type="text" placeholder="Фильтр по тексту" />
+                </div>
+                <select class="select" id="logLevelFilter" style="width:144px; height:30px; font-size:12.5px;">
+                  <option value="all">Все записи</option>
+                  <option value="error">Только ошибки</option>
+                  <option value="warn">Предупреждения</option>
+                </select>
+                <label class="check-item" style="padding:4px 10px; height:30px; font-size:12px;">
+                  <input type="checkbox" id="logAutoScroll" checked />
+                  <span>Автопрокрутка</span>
+                </label>
+                <button class="btn btn-sm" id="btnCopyLogs" type="button">Копировать</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="log-box full" id="globalLogBox"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Add Account Modal -->
+  <div class="modal-backdrop" id="addAccountModal" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addModalTitle">
+      <div class="card-header">
+        <div>
+          <div class="card-title" id="addModalTitle">Новый профиль аккаунта</div>
+          <div class="card-sub">Отдельная папка с изолированными cookies и настройками</div>
+        </div>
+        <button class="btn btn-ghost btn-icon btn-sm" id="btnCloseAddModal" type="button" aria-label="Закрыть">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      <form id="addAccountForm">
+        <div class="card-body">
+          <div class="field">
+            <label class="field-label" for="addProfileName">Имя профиля</label>
+            <input class="input" id="addProfileName" type="text" placeholder="Например: main или farm_2" autocomplete="off" required />
+          </div>
+          <div class="field">
+            <label class="field-label" for="addProfileProxy">
+              <span>Прокси (необязательно)</span>
+              <span class="field-hint">http:// или socks5://</span>
+            </label>
+            <input class="input mono" id="addProfileProxy" type="text" placeholder="http://user:pass@127.0.0.1:8080" autocomplete="off" />
+          </div>
+          <label class="check-item">
+            <input type="checkbox" id="addProfileAutoStart" checked />
+            <span>Запустить сразу и запросить код привязки Twitch</span>
+          </label>
+          <div id="addModalError" style="display:none; font-size:12px; color:var(--danger);"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" id="btnCancelAddModal" type="button">Отмена</button>
+          <button class="btn btn-primary" type="submit">Создать профиль</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Item Preview Modal -->
+  <div class="modal-backdrop" id="itemPreviewModal" aria-hidden="true">
+    <div class="modal modal-preview" role="dialog" aria-modal="true" aria-labelledby="previewItemTitle">
+      <div class="card-header">
+        <div style="min-width:0;">
+          <div class="card-title" id="previewItemTitle">Предмет награды</div>
+          <div class="card-sub" id="previewItemSub">—</div>
+        </div>
+        <button class="btn btn-ghost btn-icon btn-sm" id="btnClosePreviewModal" type="button" aria-label="Закрыть">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="preview-stage" id="previewStage" title="Нажмите для увеличения">
+          <img id="previewMainImg" alt="" style="display:none;" />
+          <div class="thumb-fallback" id="previewFallback" style="display:none;">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2z"/><path d="M12 22V7"/></svg>
+          </div>
+          <span class="preview-zoom-hint" id="previewZoomHint">1x · нажмите для приближения</span>
+        </div>
+
+        <div class="preview-thumbs" id="previewThumbs" style="display:none;"></div>
+
+        <div class="inspector-section">
+          <div class="kv-grid">
+            <span class="kv-k">Предмет</span>
+            <span class="kv-v" id="pvBenefitName">—</span>
+            <span class="kv-k">Тип</span>
+            <span class="kv-v" id="pvBenefitType">—</span>
+            <span class="kv-k">Игра</span>
+            <span class="kv-v" id="pvGameName">—</span>
+            <span class="kv-k">Кампания</span>
+            <span class="kv-v" id="pvCampaignName">—</span>
+            <span class="kv-k">Профиль</span>
+            <span class="kv-v" id="pvAccountName">—</span>
+            <span class="kv-k">Прогресс</span>
+            <span class="kv-v num" id="pvProgress">—</span>
+            <span class="kv-k">До окончания</span>
+            <span class="kv-v num" id="pvEndsAt">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="btnToggleZoom" type="button">Приблизить 2x</button>
+        <button class="btn" id="btnOpenOriginalImg" type="button" style="display:none;">Открыть оригинал</button>
+        <button class="btn btn-primary" id="btnClosePreviewFoot" type="button">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span class="dot ok" id="toastDot"></span>
+    <span id="toastText"></span>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      const VIEW_META = {
+        accounts: { title: "Аккаунты", sub: "Состояние профилей, авторизация и прогресс фарма" },
+        radar: { title: "Радар и цели", sub: "Закреплённые стримеры, приоритет игр и сетевой режим" },
+        campaigns: { title: "Кампании", sub: "Доступные дропсы и история подтверждённых наград" },
+        logs: { title: "Журнал", sub: "Системные события оркестратора и воркеров" },
+      };
+
+      const state = {
+        activeView: "accounts",
+        selectedAccount: null,
+        confirmDeleteFor: null,
+        snapshot: null,
+        settingsDirty: false,
+        lastRenderSig: {},
+        toastTimer: null,
+        pollTimer: null,
+        polling: false,
+        previewCatalog: {},
+        previewCounter: 0,
+        activePreview: null,
+        previewBenefitIdx: 0,
+        campaignFavOnly: false,
+        activeRadarPreset: "default",
+      };
+
+      // Cache DOM handles
+      const el = {
+        navBtns: document.querySelectorAll(".nav-btn"),
+        views: document.querySelectorAll(".view"),
+        topbarTitle: document.getElementById("topbarTitle"),
+        topbarSub: document.getElementById("topbarSub"),
+        appVersionSub: document.getElementById("appVersionSub"),
+
+        navAccountsCount: document.getElementById("navAccountsCount"),
+        navRadarCount: document.getElementById("navRadarCount"),
+        navCampaignsCount: document.getElementById("navCampaignsCount"),
+        navLogsCount: document.getElementById("navLogsCount"),
+
+        sidebarRadarTime: document.getElementById("sidebarRadarTime"),
+        sidebarLiveCount: document.getElementById("sidebarLiveCount"),
+        sidebarWsCount: document.getElementById("sidebarWsCount"),
+
+        kpiRunning: document.getElementById("kpiRunning"),
+        kpiRunningSub: document.getElementById("kpiRunningSub"),
+        kpiMining: document.getElementById("kpiMining"),
+        kpiMiningSub: document.getElementById("kpiMiningSub"),
+        kpiClaimed: document.getElementById("kpiClaimed"),
+        kpiSockets: document.getElementById("kpiSockets"),
+        kpiRadarSub: document.getElementById("kpiRadarSub"),
+
+        accountSearchInput: document.getElementById("accountSearchInput"),
+        accountHeadRow: document.getElementById("accountHeadRow"),
+        accountListContainer: document.getElementById("accountListContainer"),
+
+        inspTitle: document.getElementById("inspTitle"),
+        inspSub: document.getElementById("inspSub"),
+        inspBadge: document.getElementById("inspBadge"),
+        inspBadgeText: document.getElementById("inspBadgeText"),
+        inspectorBody: document.getElementById("inspectorBody"),
+
+        setPinned: document.getElementById("setPinned"),
+        setKeywords: document.getElementById("setKeywords"),
+        setPriorityGames: document.getElementById("setPriorityGames"),
+        setExcludeGames: document.getElementById("setExcludeGames"),
+        setPriorityMode: document.getElementById("setPriorityMode"),
+        setQuality: document.getElementById("setQuality"),
+        setRadarInterval: document.getElementById("setRadarInterval"),
+        setHybridSpade: document.getElementById("setHybridSpade"),
+        setStandbyPinned: document.getElementById("setStandbyPinned"),
+        setBadgesEmotes: document.getElementById("setBadgesEmotes"),
+        setAvailableCheck: document.getElementById("setAvailableCheck"),
+        btnResetSettings: document.getElementById("btnResetSettings"),
+        btnSaveSettings: document.getElementById("btnSaveSettings"),
+
+        radarLastPollPill: document.getElementById("radarLastPollPill"),
+        radarErrorBanner: document.getElementById("radarErrorBanner"),
+        autoPromotedChips: document.getElementById("autoPromotedChips"),
+        pinnedStreamsBody: document.getElementById("pinnedStreamsBody"),
+        radarPresetsBar: document.getElementById("radarPresetsBar"),
+        presetAllCount: document.getElementById("presetAllCount"),
+        presetPcCount: document.getElementById("presetPcCount"),
+
+        campaignFavOnlyBtn: document.getElementById("btnCampaignFavOnly"),
+        campaignFavCount: document.getElementById("campaignFavCount"),
+        campaignStatusFilter: document.getElementById("campaignStatusFilter"),
+        campaignSortSelect: document.getElementById("campaignSortSelect"),
+        campaignAccountFilter: document.getElementById("campaignAccountFilter"),
+        campaignSearchInput: document.getElementById("campaignSearchInput"),
+        campaignsGrid: document.getElementById("campaignsGrid"),
+        historyCountPill: document.getElementById("historyCountPill"),
+        historyTableBody: document.getElementById("historyTableBody"),
+
+        logSearchInput: document.getElementById("logSearchInput"),
+        logLevelFilter: document.getElementById("logLevelFilter"),
+        logAutoScroll: document.getElementById("logAutoScroll"),
+        globalLogBox: document.getElementById("globalLogBox"),
+
+        addAccountModal: document.getElementById("addAccountModal"),
+        addAccountForm: document.getElementById("addAccountForm"),
+        addProfileName: document.getElementById("addProfileName"),
+        addProfileProxy: document.getElementById("addProfileProxy"),
+        addProfileAutoStart: document.getElementById("addProfileAutoStart"),
+        addModalError: document.getElementById("addModalError"),
+
+        toast: document.getElementById("toast"),
+        toastDot: document.getElementById("toastDot"),
+        toastText: document.getElementById("toastText"),
+
+        itemPreviewModal: document.getElementById("itemPreviewModal"),
+        previewItemTitle: document.getElementById("previewItemTitle"),
+        previewItemSub: document.getElementById("previewItemSub"),
+        previewStage: document.getElementById("previewStage"),
+        previewMainImg: document.getElementById("previewMainImg"),
+        previewFallback: document.getElementById("previewFallback"),
+        previewZoomHint: document.getElementById("previewZoomHint"),
+        previewThumbs: document.getElementById("previewThumbs"),
+        pvBenefitName: document.getElementById("pvBenefitName"),
+        pvBenefitType: document.getElementById("pvBenefitType"),
+        pvGameName: document.getElementById("pvGameName"),
+        pvCampaignName: document.getElementById("pvCampaignName"),
+        pvAccountName: document.getElementById("pvAccountName"),
+        pvProgress: document.getElementById("pvProgress"),
+        pvEndsAt: document.getElementById("pvEndsAt"),
+        btnToggleZoom: document.getElementById("btnToggleZoom"),
+        btnOpenOriginalImg: document.getElementById("btnOpenOriginalImg"),
+      };
+
+      const FALLBACK_GIFT_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2z"/><path d="M12 22V7"/></svg>`;
+
+      function handleImgError(img) {
+        if (!img) return;
+        const fb = img.getAttribute("data-fb") || "";
+        if (fb && img.dataset.fbTried !== "1") {
+          img.dataset.fbTried = "1";
+          img.src = fb;
+          return;
+        }
+        img.style.display = "none";
+        if (img.nextElementSibling) img.nextElementSibling.style.display = "grid";
+      }
+      window.__tmmImgErr = handleImgError;
+
+      function renderThumbBox(src, alt, extraCls = "", attrs = "", fallbackSrc = "") {
+        const cleanSrc = String(src || "").trim();
+        const cleanFb = String(fallbackSrc || "").trim();
+        const fbAttr = cleanFb && cleanFb !== cleanSrc ? ` data-fb="${escapeHtml(cleanFb)}"` : "";
+        const imgTag = cleanSrc
+          ? `<img src="${escapeHtml(cleanSrc)}" alt="${escapeHtml(alt)}" loading="lazy"${fbAttr} onerror="window.__tmmImgErr(this)" />`
+          : "";
+        const fallbackStyle = cleanSrc ? "display:none;" : "display:grid;";
+        return `
+          <div class="item-thumb ${extraCls}" ${attrs}>
+            ${imgTag}
+            <span class="thumb-fallback" style="${fallbackStyle}">${FALLBACK_GIFT_SVG}</span>
+          </div>
+        `;
+      }
+
+      function registerPreviewItem(payload) {
+        const key = "pv_" + (++state.previewCounter);
+        state.previewCatalog[key] = payload;
+        return key;
+      }
+
+      function applyPreviewSlide(item, idx) {
+        const benefits = Array.isArray(item.benefits) && item.benefits.length > 0
+          ? item.benefits
+          : [{ name: item.title || "Предмет", type: "Награда", image_url: item.image_url, source_url: item.source_url }];
+        const safeIdx = Math.max(0, Math.min(idx, benefits.length - 1));
+        state.previewBenefitIdx = safeIdx;
+        const b = benefits[safeIdx];
+        const imgSrc = b.image_url || item.image_url || "";
+        const origSrc = b.source_url || item.source_url || imgSrc;
+
+        el.previewStage.classList.remove("zoomed");
+        el.btnToggleZoom.textContent = "Приблизить 2x";
+        el.previewZoomHint.textContent = "1x · нажмите для приближения";
+
+        el.previewMainImg.onerror = () => {
+          el.previewMainImg.style.display = "none";
+          el.previewFallback.style.display = "grid";
+        };
+        if (imgSrc) {
+          el.previewFallback.style.display = "none";
+          el.previewMainImg.style.display = "block";
+          el.previewMainImg.src = imgSrc;
+          el.previewMainImg.alt = b.name || item.title || "";
+        } else {
+          el.previewMainImg.style.display = "none";
+          el.previewFallback.style.display = "grid";
+        }
+
+        el.pvBenefitName.textContent = b.name || item.title || "—";
+        el.pvBenefitType.textContent = b.type || "Награда";
+        el.pvGameName.textContent = item.game || "—";
+        el.pvCampaignName.textContent = item.campaign || "—";
+        el.pvAccountName.textContent = item.account || "—";
+        el.pvProgress.textContent = item.progressText || "—";
+        el.pvEndsAt.textContent = item.endsAt || "—";
+
+        if (origSrc && origSrc.startsWith("http")) {
+          el.btnOpenOriginalImg.style.display = "inline-flex";
+          el.btnOpenOriginalImg.dataset.url = origSrc;
+        } else {
+          el.btnOpenOriginalImg.style.display = "none";
+          delete el.btnOpenOriginalImg.dataset.url;
+        }
+
+        if (benefits.length > 1) {
+          el.previewThumbs.style.display = "flex";
+          el.previewThumbs.innerHTML = benefits
+            .map((ben, i) => {
+              const activeCls = i === safeIdx ? " active" : "";
+              const bImg = ben.image_url || item.image_url || "";
+              const inner = bImg
+                ? `<img src="${escapeHtml(bImg)}" alt="${escapeHtml(ben.name)}" />`
+                : FALLBACK_GIFT_SVG;
+              return `<button class="preview-thumb-btn${activeCls}" type="button" data-preview-idx="${i}" title="${escapeHtml(ben.name)}">${inner}</button>`;
+            })
+            .join("");
+        } else {
+          el.previewThumbs.style.display = "none";
+          el.previewThumbs.innerHTML = "";
+        }
+      }
+
+      function openItemPreview(item, initialIdx = 0) {
+        if (!item) return;
+        state.activePreview = item;
+        el.previewItemTitle.textContent = item.title || "Предмет награды";
+        el.previewItemSub.textContent = `${item.game || "Twitch Drops"} · ${item.campaign || "Кампания"}`;
+        applyPreviewSlide(item, initialIdx);
+        el.itemPreviewModal.classList.add("open");
+        el.itemPreviewModal.setAttribute("aria-hidden", "false");
+      }
+
+      function closeItemPreview() {
+        el.itemPreviewModal.classList.remove("open");
+        el.itemPreviewModal.setAttribute("aria-hidden", "true");
+        el.previewStage.classList.remove("zoomed");
+      }
+
+      function togglePreviewZoom() {
+        const zoomed = el.previewStage.classList.toggle("zoomed");
+        el.btnToggleZoom.textContent = zoomed ? "Обычный 1x" : "Приблизить 2x";
+        el.previewZoomHint.textContent = zoomed ? "2x · нажмите чтобы сбросить" : "1x · нажмите для приближения";
+      }
+
+      function getApi() {
+        return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
+      }
+
+      async function callApi(method, ...args) {
+        const api = getApi();
+        if (!api || typeof api[method] !== "function") {
+          return null;
+        }
+        return await api[method](...args);
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function showToast(text, tone = "ok") {
+        el.toastText.textContent = text;
+        el.toastDot.className = "dot " + tone;
+        el.toast.classList.add("show");
+        if (state.toastTimer) clearTimeout(state.toastTimer);
+        state.toastTimer = setTimeout(() => {
+          el.toast.classList.remove("show");
+        }, 2800);
+      }
+
+      async function copyText(value, msg = "Скопировано в буфер обмена") {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(value);
+            showToast(msg, "ok");
+            return;
+          }
+        } catch (_) {}
+        const res = await callApi("copy_text", value);
+        if (res && res.ok) {
+          showToast(msg, "ok");
+        } else {
+          showToast("Не удалось скопировать текст", "warn");
+        }
+      }
+
+      function setView(viewName) {
+        if (!VIEW_META[viewName]) return;
+        state.activeView = viewName;
+        el.navBtns.forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.view === viewName);
+        });
+        el.views.forEach((sec) => {
+          sec.classList.toggle("active", sec.id === "view-" + viewName);
+        });
+        el.topbarTitle.textContent = VIEW_META[viewName].title;
+        el.topbarSub.textContent = VIEW_META[viewName].sub;
+        renderCurrentData();
+      }
+
+      function classifyAccount(acc) {
+        if (acc.auth_status === "code_ready" || acc.activation_code) {
+          return { tone: "warn", label: "Код входа" };
+        }
+        if (acc.last_error) {
+          return { tone: "danger", label: "Ошибка" };
+        }
+        if (!acc.running) {
+          return { tone: "", label: "Остановлен" };
+        }
+        if (acc.auth_status === "waiting") {
+          return { tone: "warn", label: "Вход..." };
+        }
+        if (acc.is_standby) {
+          return { tone: "info", label: "Стендбай" };
+        }
+        if (acc.watching_channel) {
+          return { tone: "ok", label: "Добыча" };
+        }
+        return { tone: "info", label: "Поиск" };
+      }
+
+      function formatTimeAgo(ts) {
+        if (!ts) return "—";
+        const diff = Math.max(0, Math.round(Date.now() / 1000 - ts));
+        if (diff < 5) return "только что";
+        if (diff < 60) return diff + " сек назад";
+        const mins = Math.round(diff / 60);
+        return mins + " мин назад";
+      }
+
+      function renderShellMeta(data) {
+        const accounts = data.accounts || [];
+        const radar = data.radar || {};
+        const pinnedStreams = radar.pinned_streams || [];
+        const campaigns = data.campaigns || [];
+        const logs = data.global_logs || [];
+        const history = data.claimed_history || [];
+
+        const runningCount = accounts.filter((a) => a.running).length;
+        const miningCount = accounts.filter((a) => a.running && a.watching_channel && !a.is_standby).length;
+        const standbyCount = accounts.filter((a) => a.running && a.is_standby).length;
+        const needAuthCount = accounts.filter((a) => a.auth_status === "code_ready" || a.activation_code).length;
+        const claimedSum = Math.max(
+          history.length,
+          accounts.reduce((acc, item) => acc + (item.claimed_count || 0), 0)
+        );
+        const wsConn = accounts.reduce((acc, item) => acc + (item.ws_connected || 0), 0);
+        const wsTotal = accounts.reduce((acc, item) => acc + (item.ws_total || 0), 0);
+        const livePinned = pinnedStreams.filter((s) => s.online).length;
+
+        el.appVersionSub.textContent = "Версия " + (data.version || "1.0.0");
+        el.navAccountsCount.textContent = String(accounts.length);
+        el.navRadarCount.textContent = String(livePinned);
+        el.navCampaignsCount.textContent = String(campaigns.length);
+        el.navLogsCount.textContent = String(logs.length);
+
+        const pollText = radar.last_poll_label || formatTimeAgo(radar.last_poll_ts);
+        el.sidebarRadarTime.textContent = pollText;
+        el.sidebarLiveCount.textContent = String(livePinned);
+        el.sidebarWsCount.textContent = wsConn + " / " + wsTotal;
+
+        el.kpiRunning.textContent = runningCount + " / " + accounts.length;
+        el.kpiRunningSub.textContent =
+          needAuthCount > 0
+            ? "Ожидают код входа: " + needAuthCount
+            : runningCount > 0
+            ? "Профили работают параллельно"
+            : "Нажмите «Запустить все» для старта";
+
+        el.kpiMining.textContent = String(miningCount);
+        el.kpiMiningSub.textContent = "Стендбай: " + standbyCount;
+
+        el.kpiClaimed.textContent = String(claimedSum);
+        el.kpiSockets.textContent = wsConn + " / " + wsTotal;
+        el.kpiRadarSub.textContent = radar.last_error
+          ? "Ошибка радара"
+          : "Последний опрос: " + pollText;
+      }
+
+      function renderAccountsMatrix(data) {
+        const accounts = data.accounts || [];
+        const query = (el.accountSearchInput.value || "").trim().toLowerCase();
+        const filtered = accounts.filter((a) => {
+          if (!query) return true;
+          const hay = [
+            a.name,
+            a.username,
+            a.watching_channel,
+            a.watching_game,
+            a.campaign_name,
+            a.drop_name,
+            a.status_text,
+          ]
+            .join(" ")
+            .toLowerCase();
+          return hay.includes(query);
+        });
+
+        if (accounts.length > 0 && (!state.selectedAccount || !accounts.some((a) => a.name === state.selectedAccount))) {
+          state.selectedAccount = accounts[0].name;
+          state.confirmDeleteFor = null;
+        } else if (accounts.length === 0) {
+          state.selectedAccount = null;
+          state.confirmDeleteFor = null;
+        }
+
+        const sig = JSON.stringify({
+          filtered: filtered.map((a) => [
+            a.name,
+            a.username,
+            a.running,
+            a.auth_status,
+            a.activation_code,
+            a.status_text,
+            a.is_standby,
+            a.watching_channel,
+            a.watching_game,
+            a.watching_viewers,
+            a.progress_pct,
+            a.current_minutes,
+            a.required_minutes,
+            a.proxy,
+            a.last_error,
+          ]),
+          sel: state.selectedAccount,
+          q: query,
+        });
+        if (state.lastRenderSig.matrix === sig) {
+          return;
+        }
+        state.lastRenderSig.matrix = sig;
+
+        if (accounts.length === 0) {
+          el.accountHeadRow.style.display = "none";
+          el.accountListContainer.innerHTML = `
+            <div class="empty-state">
+              <div class="empty-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>
+              </div>
+              <div style="font-size:14px; font-weight:500; color:var(--text);">Пока нет ни одного аккаунта</div>
+              <div style="font-size:12.5px; max-width:360px;">Создайте новый профиль или импортируйте готовые токены из TwitchDropsMiner.</div>
+              <div style="display:flex; gap:8px; margin-top:6px;">
+                <button class="btn" type="button" data-action="empty-import">Импортировать сессии</button>
+                <button class="btn btn-primary" type="button" data-action="empty-add">Добавить аккаунт</button>
+              </div>
+            </div>
+          `;
+          return;
+        }
+
+        el.accountHeadRow.style.display = "grid";
+
+        if (filtered.length === 0) {
+          el.accountListContainer.innerHTML = `
+            <div class="empty-state" style="padding:28px 16px;">
+              <div>По запросу «${escapeHtml(query)}» профили не найдены.</div>
+            </div>
+          `;
+          return;
+        }
+
+        el.accountListContainer.innerHTML = filtered
+          .map((acc) => {
+            const cls = classifyAccount(acc);
+            const selected = acc.name === state.selectedAccount ? " selected" : "";
+            const subIdentity = acc.username ? "@" + acc.username : "Не авторизован";
+            const proxyTag = acc.proxy ? `<span class="tag">Прокси</span>` : "";
+
+            let streamMain = acc.watching_channel || (acc.running ? acc.status_text : "Воркер остановлен");
+            let streamSub = acc.watching_game
+              ? `${acc.watching_game}${acc.watching_viewers ? " · " + acc.watching_viewers + " зр." : ""}`
+              : acc.activation_code
+              ? "Ожидает ввода кода в браузере"
+              : acc.last_error || "Готов к запуску";
+
+            const pct = Math.max(0, Math.min(100, Math.round(acc.progress_pct || 0)));
+            const minsLabel =
+              acc.required_minutes > 0
+                ? `${acc.current_minutes}/${acc.required_minutes} мин`
+                : "—";
+
+            const fillCls = cls.tone ? " " + cls.tone : "";
+            const toggleIcon = acc.running
+              ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect width="12" height="12" x="6" y="6" rx="2"/></svg>`
+              : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><polygon points="6 4 20 12 6 20 6 4"/></svg>`;
+
+            return `
+              <div class="account-row${selected}" data-account="${escapeHtml(acc.name)}">
+                <div class="cell-main">
+                  <div class="cell-title">${escapeHtml(acc.name)}</div>
+                  <div class="cell-sub">${escapeHtml(subIdentity)} ${proxyTag}</div>
+                </div>
+                <div>
+                  <span class="pill ${cls.tone}">
+                    <span class="dot ${cls.tone}"></span>
+                    <span>${escapeHtml(cls.label)}</span>
+                  </span>
+                </div>
+                <div class="cell-main">
+                  <div class="cell-title">${escapeHtml(streamMain)}</div>
+                  <div class="cell-sub">${escapeHtml(streamSub)}</div>
+                </div>
+                <div class="progress-col">
+                  <div class="progress-meta">
+                    <span>${pct}%</span>
+                    <span>${escapeHtml(minsLabel)}</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill${fillCls}" style="width:${pct}%"></div>
+                  </div>
+                </div>
+                <div class="row-actions">
+                  <button
+                    class="btn btn-sm btn-icon"
+                    type="button"
+                    data-row-toggle="${escapeHtml(acc.name)}"
+                    title="${acc.running ? "Остановить профиль" : "Запустить профиль"}"
+                  >
+                    ${toggleIcon}
+                  </button>
+                </div>
+              </div>
+            `;
+          })
+          .join("");
+      }
+
+      function renderInspector(data) {
+        const accounts = data.accounts || [];
+        const acc = accounts.find((a) => a.name === state.selectedAccount) || null;
+
+        if (!acc) {
+          if (state.lastRenderSig.inspector === "none") return;
+          state.lastRenderSig.inspector = "none";
+          el.inspTitle.textContent = "Профиль не выбран";
+          el.inspSub.textContent = "Выберите аккаунт слева или создайте новый";
+          el.inspBadge.style.display = "none";
+          el.inspectorBody.innerHTML = `
+            <div class="empty-state" style="padding: 28px 12px;">
+              <div class="empty-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+              </div>
+              <div style="font-size:13px; color:var(--text);">Нет активного выделения</div>
+              <div style="font-size:12px;">Нажмите на любой профиль в таблице, чтобы открыть детали.</div>
+            </div>
+          `;
+          return;
+        }
+
+        const proxyInputEl = document.getElementById("inspProxyInput");
+        const isEditingProxy = proxyInputEl && document.activeElement === proxyInputEl;
+        const currentLogEl = document.getElementById("inspLogBox");
+
+        const cls = classifyAccount(acc);
+        el.inspTitle.textContent = acc.name;
+        el.inspSub.textContent = acc.username ? "@" + acc.username : "Токен Twitch не привязан";
+        el.inspBadge.style.display = "inline-flex";
+        el.inspBadge.className = "pill " + cls.tone;
+        el.inspBadge.innerHTML = `<span class="dot ${cls.tone}"></span><span>${escapeHtml(cls.label)}</span>`;
+
+        const sig = JSON.stringify({
+          acc,
+          confirm: state.confirmDeleteFor,
+        });
+
+        // Do not blow away proxy input while the user is actively typing inside it
+        if (isEditingProxy) {
+          // Only update live target text and log tail in place if present
+          const liveLog = document.getElementById("inspLogBox");
+          if (liveLog) {
+            liveLog.innerHTML = formatLogLines(acc.log_tail || []);
+          }
+          return;
+        }
+
+        if (state.lastRenderSig.inspector === sig) {
+          return;
+        }
+        state.lastRenderSig.inspector = sig;
+
+        const keycapsHtml = acc.activation_code
+          ? `
+            <div class="keycap-box">
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                <span style="font-size:13px; font-weight:600; color:var(--text);">Код авторизации Twitch</span>
+                <span class="pill warn">Ожидает подтверждения</span>
+              </div>
+              <div class="keycap-strip">
+                ${Array.from(String(acc.activation_code).trim())
+                  .map((ch) => `<span class="keycap">${escapeHtml(ch)}</span>`)
+                  .join("")}
+              </div>
+              <div style="font-size:12px; color:var(--text-muted);">
+                Перейдите на <span class="mono">twitch.tv/activate</span>, войдите в нужный аккаунт и введите код.
+              </div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button class="btn btn-primary btn-sm" type="button" data-insp-action="open-auth">Открыть активацию</button>
+                <button class="btn btn-sm" type="button" data-insp-action="copy-code">Скопировать код</button>
+              </div>
+            </div>
+          `
+          : "";
+
+        const confirmStripHtml =
+          state.confirmDeleteFor === acc.name
+            ? `
+              <div class="confirm-strip">
+                <span>Удалить профиль «${escapeHtml(acc.name)}»?</span>
+                <div style="display:flex; gap:6px;">
+                  <button class="btn btn-sm" type="button" data-insp-action="cancel-delete">Отмена</button>
+                  <button class="btn btn-sm btn-danger" type="button" data-insp-action="confirm-delete">Подтвердить</button>
+                </div>
+              </div>
+            `
+            : "";
+
+        const errorBannerHtml = acc.last_error
+          ? `
+            <div class="confirm-strip">
+              <span style="word-break:break-word;">Ошибка: ${escapeHtml(acc.last_error)}</span>
+            </div>
+          `
+          : "";
+
+        const pct = Math.max(0, Math.min(100, Math.round(acc.progress_pct || 0)));
+        const etaText =
+          acc.required_minutes > 0
+            ? `${acc.current_minutes} / ${acc.required_minutes} мин (осталось ${acc.remaining_minutes} мин)`
+            : "Нет активного дропса";
+
+        const inspThumbHtml = (acc.drop_image_url || (acc.drop_name && acc.drop_name !== "—"))
+          ? `
+            <div class="insp-target-head">
+              ${renderThumbBox(
+                acc.drop_image_url || acc.game_image_url,
+                acc.drop_name,
+                "clickable",
+                `data-insp-action="preview-target" title="Открыть изображение награды"`,
+                acc.drop_image_source || ""
+              )}
+              <div style="min-width:0; flex:1;">
+                <div style="font-size:13px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(acc.drop_name && acc.drop_name !== "—" ? acc.drop_name : acc.campaign_name || "Текущая цель")}</div>
+                <div style="font-size:12px; color:var(--text-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(acc.campaign_name || acc.watching_game || "—")}</div>
+              </div>
+            </div>
+          `
+          : "";
+
+        el.inspectorBody.innerHTML = `
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn ${acc.running ? "" : "btn-primary"} btn-sm" type="button" data-insp-action="toggle-run">
+              ${acc.running ? "Остановить" : "Запустить"}
+            </button>
+            <button class="btn btn-sm" type="button" data-insp-action="reauth" title="Сбросить cookie-сессию и войти заново">
+              Переавторизация
+            </button>
+            <button class="btn btn-sm btn-danger" type="button" data-insp-action="ask-delete" style="margin-left:auto;">
+              Удалить
+            </button>
+          </div>
+
+          ${confirmStripHtml}
+          ${errorBannerHtml}
+          ${keycapsHtml}
+
+          <div class="inspector-section">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span style="font-size:12.5px; font-weight:600; color:var(--text);">Текущая цель</span>
+              <span class="num" style="font-size:12px; color:var(--text-muted);">${pct}%</span>
+            </div>
+            ${inspThumbHtml}
+            <div class="progress-track">
+              <div class="progress-fill ${cls.tone}" style="width:${pct}%"></div>
+            </div>
+            <div class="kv-grid">
+              <span class="kv-k">Статус</span>
+              <span class="kv-v" title="${escapeHtml(acc.status_text)}">${escapeHtml(acc.status_text || "—")}</span>
+              <span class="kv-k">Кампания</span>
+              <span class="kv-v" title="${escapeHtml(acc.campaign_name)}">${escapeHtml(acc.campaign_name || "—")}</span>
+              <span class="kv-k">Награда</span>
+              <span class="kv-v" title="${escapeHtml(acc.drop_name)}">${escapeHtml(acc.drop_name || "—")}</span>
+              <span class="kv-k">Стрим</span>
+              <span class="kv-v">${escapeHtml(acc.watching_channel || "—")}${acc.watching_viewers ? " · " + acc.watching_viewers + " зр." : ""}</span>
+              <span class="kv-k">Категория</span>
+              <span class="kv-v">${escapeHtml(acc.watching_game || "—")}</span>
+              <span class="kv-k">Время</span>
+              <span class="kv-v num">${escapeHtml(etaText)}</span>
+              <span class="kv-k">Сокеты WS</span>
+              <span class="kv-v num">${acc.ws_connected || 0} / ${acc.ws_total || 0} · Собрано: ${acc.claimed_count || 0}</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="inspProxyInput">
+              <span>Индивидуальный прокси</span>
+              <span class="field-hint">Оставьте пустым для прямого IP</span>
+            </label>
+            <div class="inline-form">
+              <input class="input mono" id="inspProxyInput" type="text" value="${escapeHtml(acc.proxy || "")}" placeholder="http://user:pass@host:port" />
+              <button class="btn btn-sm" type="button" data-insp-action="save-proxy">Сохранить</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">
+              <span>События профиля</span>
+              <span class="field-hint">Последние ${(acc.log_tail || []).length} строк</span>
+            </div>
+            <div class="log-box compact" id="inspLogBox">${formatLogLines(acc.log_tail || [])}</div>
+          </div>
+        `;
+
+        const box = document.getElementById("inspLogBox");
+        if (box) box.scrollTop = box.scrollHeight;
+      }
+
+      function formatLogLines(lines) {
+        if (!lines || lines.length === 0) {
+          return `<span style="color:var(--text-faint)">Записей пока нет.</span>`;
+        }
+        return lines
+          .map((line) => {
+            const low = String(line).toLowerCase();
+            let cls = "";
+            if (low.includes("ошиб") || low.includes("error") || low.includes("traceback") || low.includes("fail")) {
+              cls = "log-line-err";
+            } else if (low.includes("warn") || low.includes("код") || low.includes("повтор")) {
+              cls = "log-line-warn";
+            } else if (low.includes("получен") || low.includes("claim") || low.includes("успеш") || low.includes("готов")) {
+              cls = "log-line-ok";
+            }
+            return `<div class="${cls}">${escapeHtml(line)}</div>`;
+          })
+          .join("");
+      }
+
+      function updateRadarPresetUI(presetKey, radarData) {
+        const clean = presetKey || "default";
+        state.activeRadarPreset = clean;
+        if (el.radarPresetsBar) {
+          el.radarPresetsBar.querySelectorAll("[data-radar-preset]").forEach((btn) => {
+            const active = btn.dataset.radarPreset === clean;
+            btn.classList.toggle("active", active);
+            btn.setAttribute("aria-pressed", active ? "true" : "false");
+          });
+        }
+        if (radarData) {
+          if (el.presetAllCount && Array.isArray(radarData.available_campaign_games)) {
+            el.presetAllCount.textContent = String(radarData.available_campaign_games.length);
+          }
+          if (el.presetPcCount && Array.isArray(radarData.pc_games)) {
+            el.presetPcCount.textContent = String(radarData.pc_games.length);
+          }
+        }
+      }
+
+      function populateSettingsForm(settings, force = false) {
+        if (!settings) return;
+        if (state.settingsDirty && !force) return;
+
+        el.setPinned.value = (settings.pinned_streamers || []).join(", ");
+        el.setKeywords.value = (settings.auto_priority_keywords || []).join(", ");
+        el.setPriorityGames.value = (settings.priority_games || []).join(", ");
+        el.setExcludeGames.value = (settings.exclude_games || []).join(", ");
+        el.setPriorityMode.value = settings.priority_mode || "ENDING_SOONEST";
+        el.setQuality.value = String(settings.connection_quality || 1);
+        el.setRadarInterval.value = String(settings.radar_interval_sec || 120);
+        el.setHybridSpade.checked = Boolean(settings.hybrid_watch_spade);
+        el.setStandbyPinned.checked = Boolean(settings.standby_on_pinned);
+        el.setBadgesEmotes.checked = Boolean(settings.enable_badges_emotes);
+        el.setAvailableCheck.checked = Boolean(settings.available_drops_check);
+        updateRadarPresetUI(settings.radar_preset || "default", state.snapshot && state.snapshot.radar);
+        state.settingsDirty = false;
+        el.btnResetSettings.style.display = "none";
+      }
+
+      function renderRadarView(data) {
+        const radar = data.radar || {};
+        populateSettingsForm(data.settings, false);
+        updateRadarPresetUI(
+          radar.preset || (data.settings && data.settings.radar_preset) || state.activeRadarPreset,
+          radar
+        );
+
+        const sig = JSON.stringify(radar);
+        if (state.lastRenderSig.radar === sig) return;
+        state.lastRenderSig.radar = sig;
+
+        el.radarLastPollPill.textContent = "Опрос: " + (radar.last_poll_label || formatTimeAgo(radar.last_poll_ts));
+
+        if (radar.last_error) {
+          el.radarErrorBanner.style.display = "flex";
+          el.radarErrorBanner.textContent = "Последняя ошибка радара: " + radar.last_error;
+        } else {
+          el.radarErrorBanner.style.display = "none";
+        }
+
+        const autoGames = radar.auto_promoted_games || [];
+        el.autoPromotedChips.innerHTML =
+          autoGames.length > 0
+            ? autoGames.map((g) => `<span class="chip">${escapeHtml(g)}</span>`).join("")
+            : `<span class="field-hint">Пока нет автоматически повышенных категорий</span>`;
+
+        const streams = radar.pinned_streams || [];
+        if (streams.length === 0) {
+          el.pinnedStreamsBody.innerHTML = `
+            <tr><td colspan="5" style="color:var(--text-faint); text-align:center; padding:24px;">Список закреплённых стримеров пуст</td></tr>
+          `;
+          return;
+        }
+
+        el.pinnedStreamsBody.innerHTML = streams
+          .map((s) => {
+            const dotCls = s.online ? "ok" : "";
+            const statusText = s.online ? "В эфире" : "Офлайн";
+            const campaigns = (s.active_campaign_names || []).join(", ") || "—";
+            return `
+              <tr>
+                <td>
+                  <div style="font-weight:500;">${escapeHtml(s.display_name || s.login)}</div>
+                  <div style="font-size:11.5px; color:var(--text-faint);">@${escapeHtml(s.login)}</div>
+                </td>
+                <td>
+                  <span class="pill ${dotCls}">
+                    <span class="dot ${dotCls}"></span>
+                    <span>${statusText}</span>
+                  </span>
+                </td>
+                <td>${escapeHtml(s.game_name || "—")}</td>
+                <td class="num">${s.online ? escapeHtml(s.viewers || 0) : "—"}</td>
+                <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(campaigns)}">
+                  ${escapeHtml(campaigns)}
+                </td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+
+      function getCampaignStatusInfo(c) {
+        if (c.finished) return { key: "finished", rank: 2, tone: "ok", label: "Завершена" };
+        if (c.active) return { key: "active", rank: 0, tone: "info", label: "Активна" };
+        if (c.upcoming) return { key: "upcoming", rank: 1, tone: "warn", label: "Скоро" };
+        return { key: "expired", rank: 3, tone: "warn", label: "Истекла" };
+      }
+
+      function renderCampaignsView(data) {
+        const accounts = data.accounts || [];
+        const campaigns = data.campaigns || [];
+        const history = data.claimed_history || [];
+        const favSet = new Set((data.settings && data.settings.favorite_campaigns) || []);
+        const isFavCampaign = (c) => Boolean(c.is_favorite || favSet.has(c.id));
+
+        const prevFilter = el.campaignAccountFilter.value;
+        const optHtml =
+          `<option value="">Все аккаунты</option>` +
+          accounts.map((a) => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)}</option>`).join("");
+        if (el.campaignAccountFilter.dataset.optsSig !== optHtml) {
+          el.campaignAccountFilter.dataset.optsSig = optHtml;
+          el.campaignAccountFilter.innerHTML = optHtml;
+          el.campaignAccountFilter.value = accounts.some((a) => a.name === prevFilter) ? prevFilter : "";
+        }
+
+        const favCount = campaigns.filter(isFavCampaign).length;
+        if (el.campaignFavCount) {
+          el.campaignFavCount.textContent = String(favCount);
+        }
+        if (el.campaignFavOnlyBtn) {
+          el.campaignFavOnlyBtn.classList.toggle("active", Boolean(state.campaignFavOnly));
+        }
+
+        const accFilter = el.campaignAccountFilter.value;
+        const statusFilter = el.campaignStatusFilter ? el.campaignStatusFilter.value : "all";
+        const sortMode = el.campaignSortSelect ? el.campaignSortSelect.value : "fav_status";
+        const favOnly = Boolean(state.campaignFavOnly || statusFilter === "favorites");
+        const query = (el.campaignSearchInput.value || "").trim().toLowerCase();
+
+        const filtered = campaigns.filter((c) => {
+          const fav = isFavCampaign(c);
+          if (favOnly && !fav) return false;
+          if (accFilter && c.account !== accFilter) return false;
+          const st = getCampaignStatusInfo(c);
+          if (statusFilter === "active" && st.key !== "active") return false;
+          if (statusFilter === "in_progress" && !((c.progress || 0) > 0 && !c.finished)) return false;
+          if (statusFilter === "upcoming" && st.key !== "upcoming") return false;
+          if (statusFilter === "finished" && st.key !== "finished") return false;
+          if (statusFilter === "expired" && st.key !== "expired") return false;
+          if (!query) return true;
+          return `${c.game} ${c.name} ${c.account}`.toLowerCase().includes(query);
+        });
+
+        filtered.sort((a, b) => {
+          const fa = isFavCampaign(a) ? 0 : 1;
+          const fb = isFavCampaign(b) ? 0 : 1;
+          const sa = getCampaignStatusInfo(a);
+          const sb = getCampaignStatusInfo(b);
+
+          if (sortMode === "fav_status") {
+            if (fa !== fb) return fa - fb;
+            if (sa.rank !== sb.rank) return sa.rank - sb.rank;
+            if ((b.progress || 0) !== (a.progress || 0)) return (b.progress || 0) - (a.progress || 0);
+            return String(a.game || "").localeCompare(String(b.game || ""), "ru");
+          }
+          if (sortMode === "status") {
+            if (sa.rank !== sb.rank) return sa.rank - sb.rank;
+            if (fa !== fb) return fa - fb;
+            if ((b.progress || 0) !== (a.progress || 0)) return (b.progress || 0) - (a.progress || 0);
+            return String(a.game || "").localeCompare(String(b.game || ""), "ru");
+          }
+          if (sortMode === "progress_desc") {
+            if ((b.progress || 0) !== (a.progress || 0)) return (b.progress || 0) - (a.progress || 0);
+            if (fa !== fb) return fa - fb;
+            return sa.rank - sb.rank;
+          }
+          if (sortMode === "remaining_asc") {
+            const ra = a.finished ? 1e9 : (a.remaining_minutes ?? 1e9);
+            const rb = b.finished ? 1e9 : (b.remaining_minutes ?? 1e9);
+            if (ra !== rb) return ra - rb;
+            return fa - fb;
+          }
+          if (sortMode === "game_asc") {
+            const cmp = String(a.game || "").localeCompare(String(b.game || ""), "ru");
+            if (cmp !== 0) return cmp;
+            return String(a.name || "").localeCompare(String(b.name || ""), "ru");
+          }
+          return 0;
+        });
+
+        const sig = JSON.stringify({
+          filtered,
+          history,
+          favIds: Array.from(favSet).sort(),
+          statusFilter,
+          sortMode,
+          favOnly,
+        });
+        if (state.lastRenderSig.campaigns === sig) return;
+        state.lastRenderSig.campaigns = sig;
+        state.previewCatalog = {};
+
+        if (filtered.length === 0) {
+          el.campaignsGrid.innerHTML = `
+            <div class="empty-state" style="grid-column: 1 / -1; padding: 28px 16px;">
+              <div style="font-size:13px; color:var(--text);">Кампании не найдены</div>
+              <div style="font-size:12px;">${
+                favOnly
+                  ? "Нажмите на звёздочку у нужных кампаний, чтобы добавить их в избранное."
+                  : "Измените фильтры или запустите авторизованный профиль для загрузки инвентаря Twitch."
+              }</div>
+            </div>
+          `;
+        } else {
+          el.campaignsGrid.innerHTML = filtered
+            .map((c) => {
+              const fav = isFavCampaign(c);
+              const pct = Math.max(0, Math.min(100, Math.round((c.progress || 0) * 100)));
+              const stInfo = getCampaignStatusInfo(c);
+              const statusTone = stInfo.tone;
+              const statusLabel = stInfo.label;
+              const gameArtFb = c.source_url && c.source_url !== c.image_url ? ` data-fb="${escapeHtml(c.source_url)}"` : "";
+              const gameArtHtml = c.image_url
+                ? `<div class="game-art"><img src="${escapeHtml(c.image_url)}" alt="${escapeHtml(c.game)}" loading="lazy"${gameArtFb} onerror="window.__tmmImgErr(this)" /><span class="thumb-fallback" style="display:none;">${FALLBACK_GIFT_SVG}</span></div>`
+                : `<div class="game-art">${FALLBACK_GIFT_SVG}</div>`;
+
+              const dropsHtml = (c.drops || [])
+                .map((d) => {
+                  const title = d.rewards_text || d.name;
+                  const benefits = Array.isArray(d.benefits) ? d.benefits : [];
+                  const firstType = benefits.length > 0 ? benefits[0].type : "Награда";
+                  const extraSuffix = benefits.length > 1 ? ` · ${benefits.length} предм.` : "";
+                  const progressStr = d.is_claimed
+                    ? "Получено"
+                    : `${d.current_minutes} / ${d.required_minutes} мин`;
+                  const dropPct = d.is_claimed
+                    ? 100
+                    : d.required_minutes > 0
+                    ? Math.max(0, Math.min(100, Math.round((d.current_minutes / d.required_minutes) * 100)))
+                    : 0;
+                  const pvId = registerPreviewItem({
+                    title,
+                    game: c.game,
+                    campaign: c.name,
+                    account: c.account,
+                    image_url: d.image_url || c.image_url || "",
+                    source_url: d.source_url || c.source_url || "",
+                    benefits,
+                    progressText: progressStr,
+                    endsAt: c.ends_at || "—",
+                  });
+                  const doneTag = d.is_claimed
+                    ? `<span style="color:var(--ok); font-weight:500; white-space:nowrap;">Получено</span>`
+                    : `<span class="num" style="color:var(--text-muted); white-space:nowrap;">${d.current_minutes}/${d.required_minutes} мин</span>`;
+
+                  const photoList = benefits.length > 0
+                    ? benefits
+                    : [
+                        {
+                          name: title,
+                          image_url: d.image_url || c.image_url || "",
+                          source_url: d.source_url || c.source_url || "",
+                        },
+                      ];
+                  const photosHtml = photoList
+                    .map((ben, bIdx) =>
+                      renderThumbBox(
+                        ben.image_url || d.image_url || c.image_url,
+                        ben.name || title,
+                        "lg clickable",
+                        `data-preview-idx="${bIdx}" title="${escapeHtml((ben.name || title) + " — нажмите для увеличения")}"`,
+                        ben.source_url || d.source_url || c.source_url || ""
+                      )
+                    )
+                    .join("");
+
+                  return `
+                    <div class="drop-item" role="button" tabindex="0" data-preview-id="${pvId}" title="Нажмите для увеличения">
+                      <div class="drop-photos">${photosHtml}</div>
+                      <div class="drop-body">
+                        <div class="drop-body-head">
+                          <div class="drop-name" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+                          ${doneTag}
+                        </div>
+                        <div class="drop-meta-row">
+                          <span>${escapeHtml(firstType + extraSuffix)}</span>
+                        </div>
+                        <div class="drop-progress-bar">
+                          <div class="drop-progress-fill${d.is_claimed ? " ok" : ""}" style="width:${dropPct}%"></div>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                })
+                .join("");
+
+              const starSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="${fav ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+
+              return `
+                <div class="campaign-card${fav ? " is-fav" : ""}" data-campaign-id="${escapeHtml(c.id)}">
+                  <div class="campaign-head">
+                    ${gameArtHtml}
+                    <div style="min-width:0; flex:1;">
+                      <div style="font-size:13px; font-weight:600; color:var(--text);">${escapeHtml(c.game)}</div>
+                      <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">${escapeHtml(c.name)}</div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
+                      <span class="pill ${statusTone}">
+                        <span class="dot ${statusTone}"></span>
+                        <span>${statusLabel}</span>
+                      </span>
+                      <button
+                        class="btn-fav${fav ? " active" : ""}"
+                        type="button"
+                        data-fav-campaign="${escapeHtml(c.id)}"
+                        aria-pressed="${fav ? "true" : "false"}"
+                        title="${fav ? "Убрать из избранного" : "Добавить в избранное"}"
+                      >${starSvg}</button>
+                    </div>
+                  </div>
+                  <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-faint);">
+                    <span>Профиль: ${escapeHtml(c.account)}</span>
+                    <span class="num">${c.claimed_drops}/${c.total_drops} дропсов · ${pct}%</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill ${statusTone}" style="width:${pct}%"></div>
+                  </div>
+                  <div class="drops-list">${dropsHtml}</div>
+                </div>
+              `;
+            })
+            .join("");
+        }
+
+        el.historyCountPill.textContent = history.length + " шт.";
+        if (history.length === 0) {
+          el.historyTableBody.innerHTML = `
+            <tr><td colspan="5" style="color:var(--text-faint); text-align:center; padding:24px;">Полученных дропсов в текущей сессии пока нет</td></tr>
+          `;
+        } else {
+          el.historyTableBody.innerHTML = history
+            .map((h) => {
+              const pvId = registerPreviewItem({
+                title: h.drop_name || "Награда",
+                game: h.game || "—",
+                campaign: h.campaign || "—",
+                account: h.account || "—",
+                image_url: h.image_url || "",
+                source_url: h.source_url || "",
+                benefits: [
+                  {
+                    name: h.drop_name || "Награда",
+                    type: "Полученный предмет",
+                    image_url: h.image_url || "",
+                    source_url: h.source_url || "",
+                  },
+                ],
+                progressText: "Получено в " + (h.claimed_at || "—"),
+                endsAt: "—",
+              });
+              return `
+              <tr>
+                <td class="num" style="color:var(--text-muted);">${escapeHtml(h.claimed_at || "—")}</td>
+                <td>${escapeHtml(h.account || "—")}</td>
+                <td>${escapeHtml(h.game || "—")}</td>
+                <td>${escapeHtml(h.campaign || "—")}</td>
+                <td>
+                  <div style="display:flex; align-items:center; gap:10px; font-weight:500;">
+                    ${renderThumbBox(h.image_url, h.drop_name, "sm clickable", `data-preview-id="${pvId}" title="Посмотреть картинку"`, h.source_url || "")}
+                    <span>${escapeHtml(h.drop_name || "—")}</span>
+                  </div>
+                </td>
+              </tr>
+            `;
+            })
+            .join("");
+        }
+      }
+
+      function renderLogsView(data) {
+        const logs = data.global_logs || [];
+        const query = (el.logSearchInput.value || "").trim().toLowerCase();
+        const level = el.logLevelFilter.value;
+
+        const filtered = logs.filter((line) => {
+          const low = String(line).toLowerCase();
+          if (level === "error" && !low.includes("ошиб") && !low.includes("error") && !low.includes("traceback")) {
+            return false;
+          }
+          if (level === "warn" && !low.includes("warn") && !low.includes("код") && !low.includes("повтор") && !low.includes("ошиб")) {
+            return false;
+          }
+          if (query && !low.includes(query)) return false;
+          return true;
+        });
+
+        const sig = JSON.stringify({ filtered, level, query });
+        if (state.lastRenderSig.logs === sig) return;
+        state.lastRenderSig.logs = sig;
+
+        el.globalLogBox.innerHTML = formatLogLines(filtered);
+        if (el.logAutoScroll.checked) {
+          el.globalLogBox.scrollTop = el.globalLogBox.scrollHeight;
+        }
+      }
+
+      function renderCurrentData() {
+        const data = state.snapshot;
+        if (!data) return;
+        renderShellMeta(data);
+
+        if (state.activeView === "accounts") {
+          renderAccountsMatrix(data);
+          renderInspector(data);
+        } else if (state.activeView === "radar") {
+          renderRadarView(data);
+        } else if (state.activeView === "campaigns") {
+          renderCampaignsView(data);
+        } else if (state.activeView === "logs") {
+          renderLogsView(data);
+        }
+      }
+
+      async function refreshState() {
+        if (state.polling) return;
+        state.polling = true;
+        try {
+          const fresh = await callApi("get_state");
+          if (fresh) {
+            state.snapshot = fresh;
+            renderCurrentData();
+          }
+        } catch (err) {
+          console.error("get_state error:", err);
+        } finally {
+          state.polling = false;
+        }
+      }
+
+      function splitTokens(raw) {
+        return String(raw || "")
+          .split(/[\n,;]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+
+      // Modal controls
+      function openAddModal() {
+        el.addModalError.style.display = "none";
+        el.addModalError.textContent = "";
+        el.addProfileName.value = "";
+        el.addProfileProxy.value = "";
+        el.addProfileAutoStart.checked = true;
+        el.addAccountModal.classList.add("open");
+        el.addAccountModal.setAttribute("aria-hidden", "false");
+        setTimeout(() => el.addProfileName.focus(), 40);
+      }
+
+      function closeAddModal() {
+        el.addAccountModal.classList.remove("open");
+        el.addAccountModal.setAttribute("aria-hidden", "true");
+      }
+
+      // Event Listeners
+      el.navBtns.forEach((btn) => {
+        btn.addEventListener("click", () => setView(btn.dataset.view));
+      });
+
+      document.getElementById("btnHideToTray").addEventListener("click", async () => {
+        await callApi("hide_to_tray");
+      });
+
+      document.getElementById("btnStartAll").addEventListener("click", async () => {
+        const res = await callApi("start_all");
+        if (res && res.ok) {
+          showToast("Запущены все профили", "ok");
+          await refreshState();
+        }
+      });
+
+      document.getElementById("btnStopAll").addEventListener("click", async () => {
+        const res = await callApi("stop_all");
+        if (res && res.ok) {
+          showToast("Все профили остановлены", "warn");
+          await refreshState();
+        }
+      });
+
+      document.getElementById("btnImportLegacy").addEventListener("click", async () => {
+        const res = await callApi("import_legacy");
+        if (res && res.ok) {
+          if (res.imported && res.imported.length > 0) {
+            showToast("Импортированы профили: " + res.imported.join(", "), "ok");
+          } else {
+            showToast("Новых профилей для импорта не найдено", "info");
+          }
+          await refreshState();
+        }
+      });
+
+      document.getElementById("btnOpenAddModal").addEventListener("click", openAddModal);
+      document.getElementById("btnCloseAddModal").addEventListener("click", closeAddModal);
+      document.getElementById("btnCancelAddModal").addEventListener("click", closeAddModal);
+      el.addAccountModal.addEventListener("click", (e) => {
+        if (e.target === el.addAccountModal) closeAddModal();
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          if (el.itemPreviewModal.classList.contains("open")) {
+            closeItemPreview();
+            return;
+          }
+          if (el.addAccountModal.classList.contains("open")) {
+            closeAddModal();
+          }
+        }
+      });
+
+      document.getElementById("btnClosePreviewModal").addEventListener("click", closeItemPreview);
+      document.getElementById("btnClosePreviewFoot").addEventListener("click", closeItemPreview);
+      el.itemPreviewModal.addEventListener("click", (e) => {
+        if (e.target === el.itemPreviewModal) closeItemPreview();
+      });
+      el.previewStage.addEventListener("click", togglePreviewZoom);
+      el.btnToggleZoom.addEventListener("click", togglePreviewZoom);
+      el.btnOpenOriginalImg.addEventListener("click", async () => {
+        const url = el.btnOpenOriginalImg.dataset.url;
+        if (url) await callApi("open_external_url", url);
+      });
+      el.previewThumbs.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-preview-idx]");
+        if (!btn || !state.activePreview) return;
+        const idx = parseInt(btn.dataset.previewIdx || "0", 10);
+        applyPreviewSlide(state.activePreview, idx);
+      });
+
+      function openPreviewFromElement(targetEl) {
+        const trigger = targetEl.closest("[data-preview-id]");
+        if (!trigger) return;
+        const item = state.previewCatalog[trigger.dataset.previewId];
+        if (!item) return;
+        const idxEl = targetEl.closest("[data-preview-idx]");
+        const initIdx = idxEl ? parseInt(idxEl.dataset.previewIdx || "0", 10) : 0;
+        openItemPreview(item, initIdx);
+      }
+
+      document.getElementById("view-campaigns").addEventListener("click", async (e) => {
+        const favBtn = e.target.closest("[data-fav-campaign]");
+        if (favBtn) {
+          e.stopPropagation();
+          const cid = favBtn.dataset.favCampaign || "";
+          if (!cid || !state.snapshot) return;
+          const settings = state.snapshot.settings || (state.snapshot.settings = {});
+          const favList = Array.isArray(settings.favorite_campaigns)
+            ? [...settings.favorite_campaigns]
+            : [];
+          const idx = favList.indexOf(cid);
+          const added = idx === -1;
+          if (added) favList.push(cid);
+          else favList.splice(idx, 1);
+          settings.favorite_campaigns = favList;
+          (state.snapshot.campaigns || []).forEach((c) => {
+            if (c.id === cid) c.is_favorite = added;
+          });
+          renderCurrentData();
+          const res = await callApi("toggle_favorite_campaign", cid);
+          if (res && res.ok) {
+            showToast(added ? "Кампания добавлена в избранное" : "Удалено из избранного", added ? "ok" : "info");
+          }
+          return;
+        }
+        openPreviewFromElement(e.target);
+      });
+
+      document.getElementById("view-campaigns").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          const trigger = e.target.closest("[data-preview-id]");
+          if (trigger) {
+            e.preventDefault();
+            openPreviewFromElement(trigger);
+          }
+        }
+      });
+
+      el.addAccountForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const name = el.addProfileName.value.trim();
+        const proxy = el.addProfileProxy.value.trim();
+        const autoStart = el.addProfileAutoStart.checked;
+        if (!name) {
+          el.addModalError.textContent = "Укажите имя профиля";
+          el.addModalError.style.display = "block";
+          return;
+        }
+        const res = await callApi("add_profile", name, proxy, autoStart);
+        if (!res || !res.ok) {
+          el.addModalError.textContent = (res && res.error) || "Не удалось создать профиль";
+          el.addModalError.style.display = "block";
+          return;
+        }
+        state.selectedAccount = res.name || name;
+        closeAddModal();
+        showToast("Профиль «" + state.selectedAccount + "» добавлен", "ok");
+        await refreshState();
+      });
+
+      // Accounts list delegated events
+      el.accountSearchInput.addEventListener("input", renderCurrentData);
+
+      el.accountListContainer.addEventListener("click", async (e) => {
+        const emptyAction = e.target.closest("[data-action]");
+        if (emptyAction) {
+          const act = emptyAction.dataset.action;
+          if (act === "empty-add") openAddModal();
+          if (act === "empty-import") document.getElementById("btnImportLegacy").click();
+          return;
+        }
+
+        const toggleBtn = e.target.closest("[data-row-toggle]");
+        if (toggleBtn) {
+          e.stopPropagation();
+          const name = toggleBtn.dataset.rowToggle;
+          const acc = (state.snapshot?.accounts || []).find((a) => a.name === name);
+          if (!acc) return;
+          if (acc.running) {
+            await callApi("stop_profile", name);
+            showToast("Профиль «" + name + "» остановлен", "warn");
+          } else {
+            await callApi("start_profile", name);
+            showToast("Профиль «" + name + "» запущен", "ok");
+          }
+          await refreshState();
+          return;
+        }
+
+        const row = e.target.closest(".account-row");
+        if (row && row.dataset.account) {
+          state.selectedAccount = row.dataset.account;
+          state.confirmDeleteFor = null;
+          renderCurrentData();
+        }
+      });
+
+      // Inspector delegated events
+      el.inspectorBody.addEventListener("click", async (e) => {
+        const btn = e.target.closest("[data-insp-action]");
+        if (!btn || !state.selectedAccount) return;
+        const action = btn.dataset.inspAction;
+        const name = state.selectedAccount;
+        const acc = (state.snapshot?.accounts || []).find((a) => a.name === name);
+
+        if (action === "toggle-run" && acc) {
+          if (acc.running) {
+            await callApi("stop_profile", name);
+            showToast("Профиль «" + name + "» остановлен", "warn");
+          } else {
+            await callApi("start_profile", name);
+            showToast("Профиль «" + name + "» запущен", "ok");
+          }
+          await refreshState();
+        } else if (action === "open-auth" && acc) {
+          await callApi("open_activation", name);
+          if (acc.activation_code) {
+            await copyText(acc.activation_code, "Код скопирован, страница активации открыта");
+          }
+        } else if (action === "copy-code" && acc && acc.activation_code) {
+          await copyText(acc.activation_code, "Код «" + acc.activation_code + "» скопирован");
+        } else if (action === "save-proxy") {
+          const inp = document.getElementById("inspProxyInput");
+          const proxyVal = inp ? inp.value.trim() : "";
+          const res = await callApi("update_proxy", name, proxyVal);
+          if (res && res.ok) {
+            if (inp) inp.blur();
+            showToast("Прокси для «" + name + "» сохранён", "ok");
+            await refreshState();
+          } else {
+            showToast((res && res.error) || "Ошибка сохранения прокси", "danger");
+          }
+        } else if (action === "reauth") {
+          const res = await callApi("reauth_profile", name);
+          if (res && res.ok) {
+            showToast("Сессия «" + name + "» сброшена, запрошен новый вход", "info");
+            await refreshState();
+          }
+        } else if (action === "preview-target" && acc) {
+          openItemPreview({
+            title: acc.drop_name && acc.drop_name !== "—" ? acc.drop_name : acc.campaign_name || "Текущая цель",
+            game: acc.watching_game || "—",
+            campaign: acc.campaign_name || "—",
+            account: acc.name,
+            image_url: acc.drop_image_url || acc.game_image_url || "",
+            source_url: acc.drop_image_source || "",
+            benefits: [
+              {
+                name: acc.drop_name || "Награда",
+                type: "Активная цель",
+                image_url: acc.drop_image_url || acc.game_image_url || "",
+                source_url: acc.drop_image_source || "",
+              },
+            ],
+            progressText: acc.required_minutes > 0 ? `${acc.current_minutes} / ${acc.required_minutes} мин` : "—",
+            endsAt: "—",
+          });
+        } else if (action === "ask-delete") {
+          state.confirmDeleteFor = name;
+          renderInspector(state.snapshot);
+        } else if (action === "cancel-delete") {
+          state.confirmDeleteFor = null;
+          renderInspector(state.snapshot);
+        } else if (action === "confirm-delete") {
+          const res = await callApi("remove_profile", name);
+          state.confirmDeleteFor = null;
+          if (res && res.ok) {
+            state.selectedAccount = null;
+            showToast("Профиль «" + name + "» удалён", "warn");
+            await refreshState();
+          }
+        }
+      });
+
+      // Radar & settings events
+      [
+        el.setPinned,
+        el.setKeywords,
+        el.setPriorityGames,
+        el.setExcludeGames,
+        el.setPriorityMode,
+        el.setQuality,
+        el.setRadarInterval,
+        el.setHybridSpade,
+        el.setStandbyPinned,
+        el.setBadgesEmotes,
+        el.setAvailableCheck,
+      ].forEach((input) => {
+        input.addEventListener("input", () => {
+          state.settingsDirty = true;
+          el.btnResetSettings.style.display = "inline-flex";
+        });
+        input.addEventListener("change", () => {
+          state.settingsDirty = true;
+          el.btnResetSettings.style.display = "inline-flex";
+        });
+      });
+
+      el.btnResetSettings.addEventListener("click", () => {
+        if (state.snapshot && state.snapshot.settings) {
+          populateSettingsForm(state.snapshot.settings, true);
+          showToast("Изменения сброшены", "info");
+        }
+      });
+
+      el.btnSaveSettings.addEventListener("click", async () => {
+        const payload = {
+          pinned_streamers: splitTokens(el.setPinned.value).map((s) => s.toLowerCase()),
+          auto_priority_keywords: splitTokens(el.setKeywords.value),
+          priority_games: splitTokens(el.setPriorityGames.value),
+          exclude_games: splitTokens(el.setExcludeGames.value),
+          radar_preset: state.activeRadarPreset || "default",
+          priority_mode: el.setPriorityMode.value,
+          connection_quality: Math.max(1, Math.min(6, parseInt(el.setQuality.value || "1", 10))),
+          radar_interval_sec: Math.max(30, parseInt(el.setRadarInterval.value || "120", 10)),
+          hybrid_watch_spade: el.setHybridSpade.checked,
+          standby_on_pinned: el.setStandbyPinned.checked,
+          enable_badges_emotes: el.setBadgesEmotes.checked,
+          available_drops_check: el.setAvailableCheck.checked,
+        };
+        const res = await callApi("save_settings", payload);
+        if (res && res.ok) {
+          state.settingsDirty = false;
+          el.btnResetSettings.style.display = "none";
+          showToast("Настройки радара и приоритетов сохранены", "ok");
+          await refreshState();
+        } else {
+          showToast((res && res.error) || "Не удалось сохранить настройки", "danger");
+        }
+      });
+
+      if (el.radarPresetsBar) {
+        el.radarPresetsBar.addEventListener("click", async (e) => {
+          const btn = e.target.closest("[data-radar-preset]");
+          if (!btn) return;
+          const presetKey = btn.dataset.radarPreset;
+          const toastLabels = {
+            default: "Базовый пресет восстановлен",
+            all_campaigns: "Пресет «Все доступные кампании» применён",
+            pc_games: "Пресет «Игры на ПК» применён",
+          };
+          const res = await callApi("apply_radar_preset", presetKey);
+          if (res && res.ok) {
+            state.activeRadarPreset = res.preset || presetKey;
+            if (state.snapshot && res.settings) {
+              state.snapshot.settings = res.settings;
+              if (state.snapshot.radar) {
+                state.snapshot.radar.preset = state.activeRadarPreset;
+              }
+            }
+            if (res.settings) {
+              populateSettingsForm(res.settings, true);
+            }
+            state.lastRenderSig.radar = "";
+            showToast(toastLabels[presetKey] || "Пресет применён", "ok");
+            await refreshState();
+          } else if (res && res.error) {
+            showToast(res.error, "danger");
+          } else if (state.snapshot) {
+            const radar = state.snapshot.radar || {};
+            const settings = state.snapshot.settings || (state.snapshot.settings = {});
+            settings.radar_preset = presetKey;
+            radar.preset = presetKey;
+            if (presetKey === "all_campaigns") {
+              settings.priority_games = [...(radar.available_campaign_games || [])];
+              settings.exclude_games = [];
+              settings.priority_mode = "ENDING_SOONEST";
+            } else if (presetKey === "pc_games") {
+              settings.priority_games = [...(radar.pc_games || [])];
+              settings.exclude_games = [];
+              settings.priority_mode = "PRIORITY_ONLY";
+            }
+            state.activeRadarPreset = presetKey;
+            populateSettingsForm(settings, true);
+            state.lastRenderSig.radar = "";
+            renderCurrentData();
+            showToast(toastLabels[presetKey] || "Пресет применён", "ok");
+          }
+        });
+      }
+
+      document.getElementById("btnPollRadarNow").addEventListener("click", async () => {
+        const res = await callApi("poll_radar_now");
+        if (res && res.ok) {
+          showToast("Радар обновлён", "ok");
+          await refreshState();
+        } else {
+          showToast("Для опроса радара нужен хотя бы один активный клиент", "warn");
+        }
+      });
+
+      // Campaigns & Logs filter events
+      if (el.campaignFavOnlyBtn) {
+        el.campaignFavOnlyBtn.addEventListener("click", () => {
+          state.campaignFavOnly = !state.campaignFavOnly;
+          if (!state.campaignFavOnly && el.campaignStatusFilter && el.campaignStatusFilter.value === "favorites") {
+            el.campaignStatusFilter.value = "all";
+          }
+          renderCurrentData();
+        });
+      }
+      if (el.campaignStatusFilter) {
+        let prevStatusOpt = el.campaignStatusFilter.value;
+        el.campaignStatusFilter.addEventListener("change", () => {
+          const nextOpt = el.campaignStatusFilter.value;
+          if (nextOpt === "favorites") {
+            state.campaignFavOnly = true;
+          } else if (prevStatusOpt === "favorites") {
+            state.campaignFavOnly = false;
+          }
+          prevStatusOpt = nextOpt;
+          renderCurrentData();
+        });
+      }
+      if (el.campaignSortSelect) {
+        el.campaignSortSelect.addEventListener("change", renderCurrentData);
+      }
+      el.campaignAccountFilter.addEventListener("change", renderCurrentData);
+      el.campaignSearchInput.addEventListener("input", renderCurrentData);
+      el.logSearchInput.addEventListener("input", renderCurrentData);
+      el.logLevelFilter.addEventListener("change", renderCurrentData);
+
+      document.getElementById("btnCopyLogs").addEventListener("click", async () => {
+        const logs = state.snapshot?.global_logs || [];
+        await copyText(logs.join("\n"), "Журнал скопирован в буфер");
+      });
+
+      // Expose hook for push updates & Playwright testing
+      window.__hydrateDashboard = function (snapshot) {
+        if (!snapshot) return;
+        state.snapshot = snapshot;
+        renderCurrentData();
+      };
+
+      function startPolling() {
+        refreshState();
+        if (state.pollTimer) clearInterval(state.pollTimer);
+        state.pollTimer = setInterval(refreshState, 650);
+      }
+
+      window.addEventListener("pywebviewready", startPolling);
+      if (getApi()) {
+        startPolling();
+      }
+    })();
+  </script>
+</body>
+</html>

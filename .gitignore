@@ -1,0 +1,27 @@
+# Isolated account profiles (cookies, session tokens, per-account logs)
+profiles/
+*.jar
+
+# Runtime logs and local user settings
+*.log
+multiminer.log
+global_settings.json
+
+# Artwork caches
+cache/
+ui/cache/
+
+# Python bytecode & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.pytest_cache/
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
