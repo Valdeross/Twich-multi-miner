@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 class ChannelSelectorMixin:
     """Computes wanted campaign games locally, fetches eligible streams, and picks the best channel."""
 
+    def _exclusive_campaign_id(self) -> str:
+        return str(getattr(self.global_settings, "exclusive_campaign_id", "") or "").strip()  # type: ignore[attr-defined]
+
     def effective_priority_games(self) -> list[str]:
         fav_ids = set(self.global_settings.favorite_campaigns)  # type: ignore[attr-defined]
         fav_games = [c.game.name for c in self.inventory if c.id in fav_ids]  # type: ignore[attr-defined]
@@ -36,6 +39,15 @@ class ChannelSelectorMixin:
         # Only games that have earnable campaigns in self.inventory are added to wanted_games;
         # local non-campaign PC games are never sent to Twitch directory queries.
         self.wanted_games.clear()  # type: ignore[attr-defined]
+        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+        exclusive_id = self._exclusive_campaign_id()
+        if exclusive_id:
+            for campaign in self.inventory:  # type: ignore[attr-defined]
+                if campaign.id == exclusive_id and campaign.can_earn_within(next_hour):
+                    self.wanted_games.append(campaign.game)  # type: ignore[attr-defined]
+                    break
+            return
+
         exclude = set(self.global_settings.exclude_games)  # type: ignore[attr-defined]
         fav_ids = set(self.global_settings.favorite_campaigns)  # type: ignore[attr-defined]
         priority = self.effective_priority_games()
@@ -71,27 +83,31 @@ class ChannelSelectorMixin:
         no_acl: set[Game] = set()
         acl_channels: set[Channel] = set()
         next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+        exclusive_id = self._exclusive_campaign_id()
 
         for campaign in self.inventory:  # type: ignore[attr-defined]
+            if exclusive_id and campaign.id != exclusive_id:
+                continue
             if campaign.game in self.wanted_games and campaign.can_earn_within(next_hour):  # type: ignore[attr-defined]
                 if campaign.allowed_channels:
                     acl_channels.update(campaign.allowed_channels)
                 else:
                     no_acl.add(campaign.game)
 
-        # Inject pinned streamers cached in SharedCampaignRadar
-        for st in self.radar.pinned_streams.values():  # type: ignore[attr-defined]
-            if st.online and st.channel_id and st.raw_channel_data:
-                ch = Channel(
-                    self,  # type: ignore[arg-type]
-                    id=st.channel_id,
-                    login=st.login,
-                    display_name=st.display_name or st.login,
-                    pinned=True,
-                )
-                avail_payload = [{"id": cid} for cid in st.active_campaign_ids]
-                ch.external_update(st.raw_channel_data, avail_payload)
-                new_channels.add(ch)
+        # Inject pinned streamers cached in SharedCampaignRadar (disabled when waiting exclusively for one campaign)
+        if not exclusive_id:
+            for st in self.radar.pinned_streams.values():  # type: ignore[attr-defined]
+                if st.online and st.channel_id and st.raw_channel_data:
+                    ch = Channel(
+                        self,  # type: ignore[arg-type]
+                        id=st.channel_id,
+                        login=st.login,
+                        display_name=st.display_name or st.login,
+                        pinned=True,
+                    )
+                    avail_payload = [{"id": cid} for cid in st.active_campaign_ids]
+                    ch.external_update(st.raw_channel_data, avail_payload)
+                    new_channels.add(ch)
 
         acl_channels.difference_update(new_channels)
         await self.bulk_check_online(acl_channels)
@@ -162,8 +178,8 @@ class ChannelSelectorMixin:
             self.notify_ui_update()  # type: ignore[attr-defined]
             return
 
-        # Standby Mode: keep watch warm on highest-viewer live pinned streamer
-        if self.global_settings.standby_on_pinned:  # type: ignore[attr-defined]
+        # Standby Mode: keep watch warm on highest-viewer live pinned streamer (unless waiting exclusively for one campaign)
+        if self.global_settings.standby_on_pinned and not self._exclusive_campaign_id():  # type: ignore[attr-defined]
             pinned_online = [
                 ch for ch in self.channels.values() if ch.pinned and ch.online  # type: ignore[attr-defined]
             ]
@@ -201,7 +217,10 @@ class ChannelSelectorMixin:
     def can_watch(self, channel: Channel) -> bool:
         if not channel.online:
             return False
+        exclusive_id = self._exclusive_campaign_id()
         for campaign in self.inventory:  # type: ignore[attr-defined]
+            if exclusive_id and campaign.id != exclusive_id:
+                continue
             if campaign.can_earn(channel) and (
                 (channel.game is not None and channel.drops_enabled and channel.game in self.wanted_games)  # type: ignore[attr-defined]
                 or campaign.game.is_special()
@@ -234,7 +253,12 @@ class ChannelSelectorMixin:
         watching = self.watching_channel.get_with_default(channel)  # type: ignore[attr-defined]
         if watching is None:
             return None
-        campaigns = [c for c in self.inventory if c.can_earn(watching)]  # type: ignore[attr-defined]
+        exclusive_id = self._exclusive_campaign_id()
+        campaigns = [
+            c
+            for c in self.inventory  # type: ignore[attr-defined]
+            if c.can_earn(watching) and (not exclusive_id or c.id == exclusive_id)
+        ]
         if not campaigns:
             return None
         campaigns.sort(key=lambda c: c.remaining_minutes)

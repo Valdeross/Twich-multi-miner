@@ -460,7 +460,9 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
                     for ch in to_remove:
                         channels.pop(ch.id, None)
                         ch.remove()
-                if self.wanted_games or self.global_settings.standby_on_pinned:
+                if self.wanted_games or (
+                    self.global_settings.standby_on_pinned and not self._exclusive_campaign_id()
+                ):
                     self.change_state(State.CHANNELS_FETCH)
                 else:
                     self.log(self._t("status_no_campaigns"))

@@ -1031,6 +1031,105 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_exclusive_campaign_ignores_other_campaigns_and_waits_for_channels(self) -> None:
+        from constants import State
+
+        async def run() -> None:
+            worker = self._make_worker("exclusive_acc")
+            camp_a = DropsCampaign(
+                worker,
+                _make_campaign_payload(
+                    cid="camp_a",
+                    name="Other Drops",
+                    game_id="1001",
+                    game_name="OtherGame",
+                    required_minutes=30,
+                ),
+                {},
+            )
+            camp_b = DropsCampaign(
+                worker,
+                _make_campaign_payload(
+                    cid="camp_b",
+                    name="Target Mission",
+                    game_id="1002",
+                    game_name="TargetGame",
+                    required_minutes=60,
+                ),
+                {},
+            )
+            worker.inventory = [camp_a, camp_b]
+            worker._campaigns = {"camp_a": camp_a, "camp_b": camp_b}
+
+            self.gs.standby_on_pinned = True
+            self.gs.exclusive_campaign_id = "camp_b"
+
+            # Add an online pinned streamer to radar to ensure exclusive mode ignores standby
+            st = worker.radar.pinned_streams.setdefault("some_pinned", type(next(iter(worker.radar.pinned_streams.values()), object())) if worker.radar.pinned_streams else None)  # type: ignore[arg-type]
+            if st is None:
+                from radar import PinnedStreamState
+
+                st = PinnedStreamState(
+                    login="some_pinned",
+                    channel_id=777,
+                    display_name="SomePinned",
+                    online=True,
+                    raw_channel_data={"stream": {"id": "77701", "viewersCount": 5000, "game": {"id": "1001", "name": "OtherGame"}}},
+                )
+                worker.radar.pinned_streams["some_pinned"] = st
+
+            queried_games: list[str] = []
+
+            async def fake_get_streams(game: Game, *, limit: int = 20, drops_enabled: bool = True):
+                queried_games.append(game.name)
+                return []
+
+            worker.get_live_streams = fake_get_streams  # type: ignore[method-assign]
+            worker._compute_wanted_games()
+            self.assertEqual([g.name for g in worker.wanted_games], ["TargetGame"])
+
+            await worker._fetch_channels()
+            self.assertEqual(queried_games, ["TargetGame"])
+            self.assertNotIn(777, worker.channels)
+
+            # Even if a live channel for OtherGame exists, exclusive mode must refuse it and wait in IDLE
+            ch_other = Channel(worker, id=888, login="other_live", display_name="OtherLive")
+            ch_other._stream = Stream(
+                ch_other,
+                id=88801,
+                title="OtherGame Drops",
+                game={"id": "1001", "name": "OtherGame"},
+                viewers=100,
+            )
+            ch_other._stream.drops_enabled = True
+            worker.channels[888] = ch_other
+            self.assertFalse(worker.can_watch(ch_other))
+
+            worker._switch_channel()
+            self.assertIsNone(worker.watching_channel.get_with_default(None))
+            self.assertEqual(worker._state, State.IDLE)
+
+            # Once a channel for TargetGame goes live, worker selects it and picks camp_b
+            ch_target = Channel(worker, id=999, login="target_live", display_name="TargetLive")
+            ch_target._stream = Stream(
+                ch_target,
+                id=99901,
+                title="Target Mission Drops",
+                game={"id": "1002", "name": "TargetGame"},
+                viewers=250,
+            )
+            ch_target._stream.drops_enabled = True
+            worker.channels[999] = ch_target
+            self.assertTrue(worker.can_watch(ch_target))
+            worker._switch_channel()
+            self.assertEqual(worker.watching_channel.get_with_default(None), ch_target)
+            active_camp = worker.get_active_campaign(ch_target)
+            self.assertIsNotNone(active_camp)
+            assert active_camp is not None
+            self.assertEqual(active_camp.id, "camp_b")
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

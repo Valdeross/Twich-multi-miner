@@ -27,6 +27,7 @@ class GlobalSettings:
     priority_games: list[str] = field(default_factory=lambda: list(DEFAULT_PRIORITY_GAMES))
     exclude_games: list[str] = field(default_factory=list)
     favorite_campaigns: list[str] = field(default_factory=list)
+    exclusive_campaign_id: str = ""
     radar_preset: str = "default"
     language: str = "ru"
     priority_mode: str = "ENDING_SOONEST"
@@ -60,6 +61,7 @@ class GlobalSettings:
             favorite_campaigns=[
                 str(c).strip() for c in raw.get("favorite_campaigns", []) if c and str(c).strip()
             ],
+            exclusive_campaign_id=str(raw.get("exclusive_campaign_id", "") or "").strip(),
             radar_preset=str(raw.get("radar_preset", "default") or "default").strip(),
             language=(
                 str(raw.get("language", "ru") or "ru").strip().lower()

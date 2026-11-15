@@ -325,6 +325,7 @@ class DesktopBridge:
             acc["game_image_url"] = g_disp
 
         fav_set = set(self.orchestrator.global_settings.favorite_campaigns)
+        exclusive_id = str(self.orchestrator.global_settings.exclusive_campaign_id or "").strip()
         campaigns_out: list[dict[str, Any]] = []
         for acc_name, worker in list(self.orchestrator.workers.items()):
             for camp in list(worker.inventory):
@@ -368,6 +369,7 @@ class DesktopBridge:
                             "image_url": camp_img,
                             "source_url": camp_img_src,
                             "is_favorite": bool(camp.id in fav_set),
+                            "is_exclusive": bool(exclusive_id and camp.id == exclusive_id),
                             "linked": bool(camp.linked),
                             "eligible": bool(camp.eligible),
                             "active": bool(camp.active),
@@ -682,6 +684,25 @@ class DesktopBridge:
                 "id": cid,
                 "is_favorite": is_fav,
                 "favorite_campaigns": list(gs.favorite_campaigns),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def set_exclusive_campaign(self, campaign_id: str = "") -> dict[str, Any]:
+        cid = str(campaign_id or "").strip()
+        try:
+            gs = self.orchestrator.global_settings
+            if not cid or gs.exclusive_campaign_id == cid:
+                gs.exclusive_campaign_id = ""
+                active = False
+            else:
+                gs.exclusive_campaign_id = cid
+                active = True
+            self.orchestrator.save_global_settings()
+            return {
+                "ok": True,
+                "exclusive_campaign_id": gs.exclusive_campaign_id,
+                "is_exclusive": active,
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
