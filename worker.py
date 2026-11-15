@@ -155,6 +155,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self._watching_task: asyncio.Task[None] | None = None
         self._mnt_task: asyncio.Task[None] | None = None
         self._file_handler: logging.FileHandler | None = None
+        self._file_logger: logging.Logger | None = None
 
     def _t(self, key: str, **kwargs: Any) -> str:
         return tr(key, getattr(self.global_settings, "language", "ru"), **kwargs)
@@ -162,6 +163,10 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
     @property
     def user_id(self) -> int | None:
         return self._auth_state.user_id
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._auth_state.user_id is not None and self._auth_state.access_token)
 
     @property
     def proxy_url(self) -> str:
@@ -189,17 +194,8 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         line = f"[{ts}] [{self.name}] {message}"
         self.log_buffer.append(line)
         logger.log(level, f"[{self.name}] {message}")
-        if self._file_handler is not None:
-            record = logging.LogRecord(
-                name=f"TwitchMultiMiner.{self.name}",
-                level=level,
-                pathname="",
-                lineno=0,
-                msg=message,
-                args=(),
-                exc_info=None,
-            )
-            self._file_handler.emit(record)
+        if self._file_logger is not None:
+            self._file_logger.log(level, message)
         if self._on_log_cb is not None:
             self._on_log_cb(self.name, line)
 
@@ -245,13 +241,24 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             handler = logging.FileHandler(self.log_path, encoding="utf8", errors="replace")
             handler.setFormatter(FILE_FORMATTER)
+            file_logger = logging.getLogger(f"TwitchMultiMiner.profile.{self.name}")
+            file_logger.setLevel(logging.DEBUG)
+            file_logger.propagate = False
+            for existing in list(file_logger.handlers):
+                file_logger.removeHandler(existing)
+            file_logger.addHandler(handler)
             self._file_handler = handler
+            self._file_logger = file_logger
 
     def _close_file_logger(self) -> None:
+        if self._file_logger is not None and self._file_handler is not None:
+            with suppress(Exception):
+                self._file_logger.removeHandler(self._file_handler)
         if self._file_handler is not None:
             with suppress(Exception):
                 self._file_handler.close()
             self._file_handler = None
+        self._file_logger = None
 
     async def sleep_or_stop(self, seconds: float) -> None:
         if seconds <= 0 or self._stop_event.is_set():

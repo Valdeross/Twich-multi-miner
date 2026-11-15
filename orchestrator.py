@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 from collections import deque
 from contextlib import suppress
 from pathlib import Path
@@ -39,6 +40,8 @@ class MultiAccountOrchestrator:
         self._on_change_callbacks: list[Callable[[], None]] = []
         self._radar_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._last_log_emit_ts: float = 0.0
+        self._log_emit_handle: asyncio.TimerHandle | None = None
 
         self.discover_profiles()
 
@@ -48,15 +51,36 @@ class MultiAccountOrchestrator:
 
     def _emit_change(self) -> None:
         for cb in list(self._on_change_callbacks):
-            with suppress(Exception):
+            try:
                 cb()
+            except Exception:
+                logger.exception("Error in orchestrator change listener %r", cb)
+
+    def _flush_log_emit(self) -> None:
+        self._log_emit_handle = None
+        self._last_log_emit_ts = time.monotonic()
+        self._emit_change()
 
     def _handle_worker_update(self, _worker: AccountWorker) -> None:
         self._emit_change()
 
     def _handle_worker_log(self, _name: str, line: str) -> None:
         self.global_logs.append(line)
-        self._emit_change()
+        now = time.monotonic()
+        elapsed = now - self._last_log_emit_ts
+        if elapsed >= 0.15 and self._log_emit_handle is None:
+            self._last_log_emit_ts = now
+            self._emit_change()
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._last_log_emit_ts = now
+            self._emit_change()
+            return
+        if self._log_emit_handle is None:
+            delay = max(0.01, 0.15 - elapsed)
+            self._log_emit_handle = loop.call_later(delay, self._flush_log_emit)
 
     def _handle_worker_claim(self, record: ClaimedDropRecord) -> None:
         self.claimed_history.appendleft(record)
@@ -109,10 +133,14 @@ class MultiAccountOrchestrator:
         return worker
 
     async def remove_profile(self, name: str) -> None:
-        worker = self.workers.pop(name, None)
+        clean = self.validate_profile_name(name)
+        worker = self.workers.pop(clean, None)
         if worker is not None:
             await worker.stop()
-        target_dir = self.profiles_dir / name
+        base_dir = self.profiles_dir.resolve()
+        target_dir = (self.profiles_dir / clean).resolve()
+        if not target_dir.is_relative_to(base_dir) or target_dir == base_dir:
+            raise ValueError(f"Некорректный путь профиля: {name!r}")
         if target_dir.exists() and target_dir.is_dir():
             shutil.rmtree(target_dir, ignore_errors=True)
         self._emit_change()
@@ -218,7 +246,7 @@ class MultiAccountOrchestrator:
 
     def _pick_authenticated_worker(self) -> AccountWorker | None:
         for worker in self.workers.values():
-            if worker.running and worker.user_id is not None and worker._auth_state.access_token:
+            if worker.running and worker.is_authenticated:
                 return worker
         return None
 

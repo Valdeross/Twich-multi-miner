@@ -58,6 +58,11 @@ def _machine_xor_key(length: int) -> bytes:
     return digest[:length]
 
 
+def is_protected_secret(stored: str) -> bool:
+    """Return True if the secret string already uses one of the protected storage prefixes."""
+    return str(stored or "").strip().startswith(_PROTECTED_PREFIXES)
+
+
 def protect_secret(plaintext: str) -> str:
     """Encrypt an auth token using Windows DPAPI, keyring, or a machine-bound obfuscator."""
     clean = str(plaintext or "").strip()

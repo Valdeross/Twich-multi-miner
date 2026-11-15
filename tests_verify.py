@@ -956,6 +956,81 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_remove_profile_blocks_path_traversal(self) -> None:
+        async def run() -> None:
+            outside_dir = self.tmp_path / "outside_secret"
+            outside_dir.mkdir(parents=True, exist_ok=True)
+            marker = outside_dir / "keep.txt"
+            marker.write_text("safe", encoding="utf8")
+
+            orch = MultiAccountOrchestrator(
+                profiles_dir=self.tmp_path / "profiles",
+                global_settings=self.gs,
+            )
+            for bad_name in ("../outside_secret", "..\\outside_secret", "../etc", "."):
+                with self.assertRaises(ValueError):
+                    await orch.remove_profile(bad_name)
+            self.assertTrue(marker.is_file())
+
+        asyncio.run(run())
+
+    def test_proxy_credentials_protected_on_disk_and_legacy_migrated(self) -> None:
+        import json
+
+        base_dir = self.tmp_path / "profiles_proxy"
+        secret_proxy = "http://myuser:s3cretPass!@1.2.3.4:8080"
+        cfg = AccountProfileConfig(name="proxy_acc", proxy=secret_proxy)
+        cfg.ensure_identity()
+        cfg.save(base_dir)
+
+        disk_text = AccountProfileConfig.config_path("proxy_acc", base_dir).read_text(encoding="utf8")
+        self.assertNotIn("s3cretPass!", disk_text)
+
+        reloaded = AccountProfileConfig.load("proxy_acc", base_dir)
+        self.assertEqual(reloaded.proxy, secret_proxy)
+
+        # Legacy plaintext account.json auto-migrates on load
+        legacy_path = AccountProfileConfig.config_path("legacy_proxy", base_dir)
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(
+            json.dumps({"name": "legacy_proxy", "proxy": secret_proxy}),
+            encoding="utf8",
+        )
+        migrated = AccountProfileConfig.load("legacy_proxy", base_dir)
+        self.assertEqual(migrated.proxy, secret_proxy)
+        self.assertNotIn("s3cretPass!", legacy_path.read_text(encoding="utf8"))
+
+    def test_orchestrator_public_auth_and_profile_file_logger(self) -> None:
+        async def run() -> None:
+            orch = MultiAccountOrchestrator(
+                profiles_dir=self.tmp_path / "profiles_log",
+                global_settings=self.gs,
+            )
+            worker = self._make_worker("log_acc")
+            self.assertTrue(worker.is_authenticated)
+
+            worker._setup_file_logger()
+            worker.log("hello_standard_logger")
+            worker._close_file_logger()
+            self.assertIn("hello_standard_logger", worker.log_path.read_text(encoding="utf8"))
+
+            calls = 0
+
+            def good_cb() -> None:
+                nonlocal calls
+                calls += 1
+
+            def bad_cb() -> None:
+                raise RuntimeError("boom callback")
+
+            orch.add_change_listener(bad_cb)
+            orch.add_change_listener(good_cb)
+            with self.assertLogs("TwitchMultiMiner.orchestrator", level="ERROR"):
+                orch._emit_change()
+            self.assertEqual(calls, 1)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

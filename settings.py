@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from auth_transport import is_protected_secret, protect_secret, unprotect_secret
 from constants import (
     DEFAULT_AUTO_PRIORITY_KEYWORDS,
     DEFAULT_PINNED_STREAMERS,
@@ -143,20 +144,26 @@ class AccountProfileConfig:
             raw = json_load(path, defaults, merge=False)
         else:
             raw = dict(defaults)
+        raw_proxy = str(raw.get("proxy", "") or "").strip()
+        proxy = unprotect_secret(raw_proxy)
+        proxy_migrated = bool(raw_proxy) and not is_protected_secret(raw_proxy)
         cfg = cls(
             name=name,
             enabled=bool(raw.get("enabled", True)),
-            proxy=str(raw.get("proxy", "") or "").strip(),
+            proxy=proxy,
             device_id=str(raw.get("device_id", "") or "").strip(),
             session_id=str(raw.get("session_id", "") or "").strip(),
             user_agent=str(raw.get("user_agent", "") or "").strip(),
             user_id=int(raw["user_id"]) if raw.get("user_id") is not None else None,
             username=str(raw.get("username", "") or "").strip(),
         )
-        if cfg.ensure_identity() or not path.exists():
+        if cfg.ensure_identity() or not path.exists() or proxy_migrated:
             cfg.save(base_dir)
         return cfg
 
     def save(self, base_dir: Path = PROFILES_DIR) -> None:
         path = self.config_path(self.name, base_dir)
-        json_save(path, asdict(self), sort=True)
+        data = asdict(self)
+        if data.get("proxy"):
+            data["proxy"] = protect_secret(data["proxy"])
+        json_save(path, data, sort=True)
