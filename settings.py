@@ -27,6 +27,7 @@ class GlobalSettings:
     exclude_games: list[str] = field(default_factory=list)
     favorite_campaigns: list[str] = field(default_factory=list)
     radar_preset: str = "default"
+    language: str = "ru"
     priority_mode: str = "ENDING_SOONEST"
     enable_badges_emotes: bool = True
     available_drops_check: bool = True
@@ -59,6 +60,11 @@ class GlobalSettings:
                 str(c).strip() for c in raw.get("favorite_campaigns", []) if c and str(c).strip()
             ],
             radar_preset=str(raw.get("radar_preset", "default") or "default").strip(),
+            language=(
+                str(raw.get("language", "ru") or "ru").strip().lower()
+                if str(raw.get("language", "ru") or "ru").strip().lower() in ("ru", "en")
+                else "ru"
+            ),
             priority_mode=str(raw.get("priority_mode", "ENDING_SOONEST")),
             enable_badges_emotes=bool(raw.get("enable_badges_emotes", True)),
             available_drops_check=bool(raw.get("available_drops_check", True)),

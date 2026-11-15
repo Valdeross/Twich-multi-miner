@@ -35,6 +35,11 @@ class _DummyResponse:
     async def read(self) -> bytes:
         return self._text.encode("utf8")
 
+    async def json(self):
+        import json
+
+        return json.loads(self._text)
+
     def release(self) -> None:
         pass
 
@@ -768,6 +773,188 @@ class TestTwitchMultiMiner(unittest.TestCase):
                 self.assertEqual(self.gs.priority_mode, "ENDING_SOONEST")
             finally:
                 loop_thread.stop()
+
+    def test_worker_auto_restart_after_crash(self) -> None:
+        async def run() -> None:
+            worker = self._make_worker("crash_acc")
+            attempts = 0
+            sleep_delays: list[float] = []
+
+            async def fake_run() -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("transient network boom")
+                worker.stop_nowait()
+
+            async def fast_sleep(seconds: float) -> None:
+                sleep_delays.append(seconds)
+
+            worker._run = fake_run  # type: ignore[method-assign]
+            worker.sleep_or_stop = fast_sleep  # type: ignore[method-assign]
+            await worker.run()
+            self.assertEqual(attempts, 2, "Worker must auto-restart after an unexpected crash")
+            self.assertTrue(sleep_delays and sleep_delays[0] > 0)
+
+        asyncio.run(run())
+
+    def test_dpapi_cookie_protection_and_legacy_migration(self) -> None:
+        import aiohttp
+        from yarl import URL
+        from auth_transport import (
+            load_auth_token_from_jar,
+            protect_secret,
+            save_cookie_jar_protected,
+            unprotect_secret,
+        )
+
+        raw = "oauth_live_secret_token_987654"
+        enc = protect_secret(raw)
+        self.assertNotEqual(enc, raw)
+        self.assertEqual(unprotect_secret(enc), raw)
+
+        async def run() -> None:
+            url = URL("https://www.twitch.tv")
+            cookies_path = self.tmp_path / "protected_cookies.jar"
+            jar = aiohttp.CookieJar()
+            save_cookie_jar_protected(jar, cookies_path, url, raw)
+
+            disk_bytes = cookies_path.read_bytes()
+            self.assertNotIn(raw.encode("utf8"), disk_bytes, "Plaintext auth-token must never be written to cookies.jar")
+
+            jar_reloaded = aiohttp.CookieJar()
+            self.assertEqual(load_auth_token_from_jar(jar_reloaded, cookies_path, url), raw)
+
+            # Verify legacy plaintext cookies.jar auto-migrates to protected form
+            legacy_path = self.tmp_path / "legacy_cookies.jar"
+            legacy_jar = aiohttp.CookieJar()
+            legacy_jar.update_cookies({"auth-token": raw, "persistent": "12345"}, url)
+            legacy_jar.save(legacy_path)
+            self.assertIn(raw.encode("utf8"), legacy_path.read_bytes())
+
+            jar_mig = aiohttp.CookieJar()
+            loaded = load_auth_token_from_jar(jar_mig, legacy_path, url)
+            self.assertEqual(loaded, raw)
+            self.assertNotIn(raw.encode("utf8"), legacy_path.read_bytes())
+
+        asyncio.run(run())
+
+    def test_egress_ip_shared_rate_limiter_and_safe_gql_error_path(self) -> None:
+        from auth_transport import _nullify_gql_error_path, normalize_egress_key
+
+        self.assertEqual(normalize_egress_key(""), "direct")
+        self.assertEqual(
+            normalize_egress_key("http://userA:passA@10.0.0.5:8080"),
+            "http://10.0.0.5:8080",
+        )
+
+        w1 = self._make_worker("acc_direct_1")
+        w2 = self._make_worker("acc_direct_2")
+        self.assertIs(w1.get_gql_limiter(), w2.get_gql_limiter())
+
+        w3_cfg = AccountProfileConfig.load("acc_p1", self.profiles_dir)
+        w3_cfg.proxy = "http://u1:p1@192.168.10.2:3128"
+        w3 = AccountWorker(w3_cfg, self.gs, self.radar, profiles_dir=self.profiles_dir)
+
+        w4_cfg = AccountProfileConfig.load("acc_p2", self.profiles_dir)
+        w4_cfg.proxy = "http://u2:p2@192.168.10.2:3128"
+        w4 = AccountWorker(w4_cfg, self.gs, self.radar, profiles_dir=self.profiles_dir)
+
+        self.assertIs(w3.get_gql_limiter(), w4.get_gql_limiter())
+        self.assertIsNot(w1.get_gql_limiter(), w3.get_gql_limiter())
+
+        # Ensure _nullify_gql_error_path handles data=None, missing keys, and list indices
+        _nullify_gql_error_path({"data": None}, ["user", "dropCampaign"])
+        _nullify_gql_error_path({"data": {"user": None}}, ["user", "dropCampaign"])
+        item_list: dict = {"data": {"items": [{"x": 1}, {"x": 2}]}}
+        _nullify_gql_error_path(item_list, ["items", 1, "x"])
+        self.assertIsNone(item_list["data"]["items"][1]["x"])
+
+    def test_device_flow_slow_down_and_expired_token(self) -> None:
+        from contextlib import asynccontextmanager
+        import json
+
+        async def run() -> None:
+            worker = self._make_worker("dev_flow")
+            sleeps: list[float] = []
+            token_poll_count = 0
+
+            async def fake_sleep(sec: float) -> None:
+                sleeps.append(sec)
+
+            @asynccontextmanager
+            async def fake_request(method: str, url, **_kwargs):
+                nonlocal token_poll_count
+                u = str(url)
+                if u.endswith("/device"):
+                    yield _DummyResponse(
+                        200,
+                        json.dumps(
+                            {
+                                "device_code": f"dev_{len(sleeps)}",
+                                "user_code": "ABCD1234",
+                                "interval": 5,
+                                "verification_uri": "https://www.twitch.tv/activate",
+                                "expires_in": 600,
+                            }
+                        ),
+                    )
+                    return
+                token_poll_count += 1
+                if token_poll_count == 1:
+                    yield _DummyResponse(400, json.dumps({"status": 400, "error": "slow_down"}))
+                elif token_poll_count == 2:
+                    yield _DummyResponse(400, json.dumps({"status": 400, "message": "authorization_pending"}))
+                elif token_poll_count == 3:
+                    yield _DummyResponse(400, json.dumps({"status": 400, "error": "expired_token"}))
+                else:
+                    yield _DummyResponse(200, json.dumps({"access_token": "fresh_tok_after_restart"}))
+
+            worker.sleep_or_stop = fake_sleep  # type: ignore[method-assign]
+            worker.request = fake_request  # type: ignore[method-assign]
+
+            token = await worker._auth_state._oauth_device_login()
+            self.assertEqual(token, "fresh_tok_after_restart")
+            # Poll 1: 5s -> slow_down -> Poll 2: 10s -> pending -> Poll 3: 10s -> expired -> new code -> Poll 4: 5s
+            self.assertEqual(sleeps, [5, 10, 10, 5])
+
+        asyncio.run(run())
+
+    def test_pc_games_preset_local_only_never_queries_non_campaign_games(self) -> None:
+        async def run() -> None:
+            worker = self._make_worker("pc_privacy")
+            camp_val = DropsCampaign(
+                worker,
+                _make_campaign_payload(
+                    cid="camp_val_priv",
+                    name="VALORANT Drops",
+                    game_id="516575",
+                    game_name="VALORANT",
+                    required_minutes=15,
+                ),
+                {},
+            )
+            worker.inventory = [camp_val]
+            self.gs.radar_preset = "pc_games"
+            self.gs.priority_games = ["SecretLocalIndieGame", "PrivateToolGame", "VALORANT"]
+            self.gs.priority_mode = "PRIORITY_ONLY"
+
+            queried_slugs: list[str] = []
+
+            async def fake_get_streams(game: Game, *, limit: int = 20, drops_enabled: bool = True):
+                queried_slugs.append(game.slug)
+                return []
+
+            worker.get_live_streams = fake_get_streams  # type: ignore[method-assign]
+            worker._compute_wanted_games()
+            await worker._fetch_channels()
+
+            self.assertEqual([g.name for g in worker.wanted_games], ["VALORANT"])
+            self.assertEqual(queried_slugs, ["valorant"])
+            self.assertNotIn("secretlocalindiegame", queried_slugs)
+            self.assertNotIn("privatetoolgame", queried_slugs)
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

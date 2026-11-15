@@ -1,46 +1,39 @@
-"""Isolated per-account async Twitch mining worker with Device Code auth and Standby mode."""
+"""Isolated per-account async Twitch mining worker (orchestration, state machine, watch loop)."""
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections import OrderedDict, abc, deque
-from contextlib import asynccontextmanager, suppress
+import random
+from collections import OrderedDict, deque
+from collections import abc
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from time import time
-from typing import Any, Callable, Final, Literal, NoReturn, overload, TYPE_CHECKING, cast
+from typing import Any, Callable, Final, Literal, NoReturn, TYPE_CHECKING, cast
 
 import aiohttp
-from yarl import URL
 
-from channel import Channel, Stream
+from auth_transport import WorkerAuthState, WorkerTransportMixin, save_cookie_jar_protected
+from channel import Channel
+from channel_selector import ChannelSelectorMixin
 from constants import (
     CALL,
     FILE_FORMATTER,
     GQL_QUERIES,
-    MAX_CHANNELS,
-    MAX_INT,
     PROFILES_DIR,
     SPADE_INTERVAL_SECONDS,
     WATCH_INTERVAL_MAX,
     WATCH_INTERVAL_MIN,
     ClientInfo,
     ClientType,
-    GQLOperation,
     JsonType,
-    PriorityMode,
     State,
     WebsocketTopic,
 )
-from exceptions import (
-    ExitRequest,
-    GQLException,
-    LoginException,
-    MinerException,
-    ReloadRequest,
-    RequestException,
-    RequestInvalid,
-)
+from exceptions import ExitRequest, GQLException, LoginException, MinerException, ReloadRequest
+from i18n import tr
 from inventory import DropsCampaign, TimedDrop
 from settings import AccountProfileConfig, GlobalSettings
 from utils import (
@@ -48,10 +41,6 @@ from utils import (
     ExponentialBackoff,
     Game,
     RateLimiter,
-    chunk,
-    deduplicate,
-    is_socks_proxy,
-    make_connector,
     task_wrapper,
     timestamp,
 )
@@ -62,6 +51,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("TwitchMultiMiner.worker")
+_WorkerAuthState = WorkerAuthState
 
 
 @dataclass
@@ -105,228 +95,7 @@ class AccountSnapshot:
     log_tail: list[str] = field(default_factory=list)
 
 
-class _WorkerAuthState:
-    def __init__(self, worker: AccountWorker) -> None:
-        self._worker: AccountWorker = worker
-        self._lock = asyncio.Lock()
-        self._logged_in = asyncio.Event()
-        self.user_id: int | None = worker.config.user_id
-        self.username: str = worker.config.username
-        self.device_id: str = worker.config.device_id
-        self.session_id: str = worker.config.session_id
-        self.access_token: str = ""
-        self.activation_code: str = ""
-        self.verification_uri: str = ""
-        self.auth_status: str = "Не авторизован"
-
-    def invalidate(self, *, delete_cookies: bool = False) -> None:
-        self.access_token = ""
-        self.user_id = None
-        self.activation_code = ""
-        self.verification_uri = ""
-        self.auth_status = "Требуется вход"
-        self._logged_in.clear()
-        if delete_cookies:
-            if self._worker._session is not None:
-                jar = cast(aiohttp.CookieJar, self._worker._session.cookie_jar)
-                jar.clear()
-            self._worker.cookies_path.unlink(missing_ok=True)
-            self._worker.config.user_id = None
-            self._worker.config.username = ""
-            self._worker.config.save(self._worker.profiles_dir)
-        self._worker.notify_ui_update()
-
-    def clear(self) -> None:
-        self.access_token = ""
-        self.activation_code = ""
-        self.verification_uri = ""
-        self._logged_in.clear()
-
-    def headers(self, *, user_agent: str = "", gql: bool = False) -> JsonType:
-        client_info: ClientInfo = self._worker._client_type
-        hdrs: JsonType = {
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip",
-            "Accept-Language": "en-US",
-            "Pragma": "no-cache",
-            "Cache-Control": "no-cache",
-            "Client-Id": client_info.CLIENT_ID,
-            "User-Agent": user_agent or self._worker.user_agent,
-            "Client-Session-Id": self.session_id,
-            "X-Device-Id": self.device_id,
-        }
-        if gql and self.access_token:
-            hdrs["Origin"] = str(client_info.CLIENT_URL)
-            hdrs["Referer"] = str(client_info.CLIENT_URL)
-            hdrs["Authorization"] = f"OAuth {self.access_token}"
-        return hdrs
-
-    async def _oauth_device_login(self) -> str:
-        client_info: ClientInfo = self._worker._client_type
-        headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "Accept-Language": "en-US",
-            "Cache-Control": "no-cache",
-            "Client-Id": client_info.CLIENT_ID,
-            "Host": "id.twitch.tv",
-            "Origin": str(client_info.CLIENT_URL),
-            "Pragma": "no-cache",
-            "Referer": str(client_info.CLIENT_URL),
-            "User-Agent": self._worker.user_agent,
-            "X-Device-Id": self.device_id,
-        }
-        while not self._worker.stop_requested:
-            try:
-                now = datetime.now(timezone.utc)
-                init_payload = {"client_id": client_info.CLIENT_ID, "scopes": ""}
-                async with self._worker.request(
-                    "POST", "https://id.twitch.tv/oauth2/device", headers=headers, data=init_payload
-                ) as response:
-                    response_json: JsonType = await response.json()
-                    required_fields = (
-                        "device_code",
-                        "user_code",
-                        "interval",
-                        "verification_uri",
-                        "expires_in",
-                    )
-                    missing = [f for f in required_fields if f not in response_json]
-                    if response.status != 200 or missing:
-                        detail = str(
-                            response_json.get("message")
-                            or response_json.get("error")
-                            or f"HTTP {response.status}"
-                        )
-                        raise LoginException(f"Device auth failed: {detail}")
-                    device_code = str(response_json["device_code"])
-                    user_code = str(response_json["user_code"])
-                    interval = max(2, int(response_json["interval"]))
-                    verification_uri = str(response_json["verification_uri"])
-                    expires_at = now + timedelta(seconds=int(response_json["expires_in"]))
-
-                self.activation_code = user_code
-                self.verification_uri = verification_uri
-                self.auth_status = f"Код: {user_code}"
-                self._worker.log(
-                    f"Требуется активация аккаунта! Перейдите по {verification_uri} и введите код: {user_code}"
-                )
-                self._worker.notify_ui_update()
-
-                token_payload = {
-                    "client_id": client_info.CLIENT_ID,
-                    "device_code": device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                }
-                while not self._worker.stop_requested:
-                    await self._worker.sleep_or_stop(interval)
-                    if self._worker.stop_requested:
-                        raise ExitRequest()
-                    async with self._worker.request(
-                        "POST",
-                        "https://id.twitch.tv/oauth2/token",
-                        headers=headers,
-                        data=token_payload,
-                        invalidate_after=expires_at,
-                    ) as token_resp:
-                        if token_resp.status != 200:
-                            continue
-                        token_json = await token_resp.json()
-                        self.access_token = str(token_json["access_token"])
-                        self.activation_code = ""
-                        self.verification_uri = ""
-                        self._worker.notify_ui_update()
-                        return self.access_token
-            except RequestInvalid:
-                self._worker.log("Код активации истёк, запрашиваю новый...")
-                continue
-        raise ExitRequest()
-
-    async def validate(self) -> None:
-        async with self._lock:
-            await self._validate()
-
-    async def _validate(self) -> None:
-        if self.access_token and self.user_id is not None and self._logged_in.is_set():
-            return
-
-        session = await self._worker.get_session()
-        jar = cast(aiohttp.CookieJar, session.cookie_jar)
-        client_info: ClientInfo = self._worker._client_type
-        self.auth_status = "Проверка входа..."
-        self._worker.notify_ui_update()
-
-        try:
-            async with self._worker.request(
-                "GET", client_info.CLIENT_URL, headers=self.headers()
-            ) as resp:
-                await resp.text("utf8")
-            cookie = jar.filter_cookies(client_info.CLIENT_URL)
-            if "unique_id" in cookie and cookie["unique_id"].value:
-                self.device_id = cookie["unique_id"].value
-                self._worker.config.device_id = self.device_id
-        except RequestException:
-            pass
-
-        validate_response: JsonType | None = None
-        for _mismatch in range(2):
-            for _attempt in range(2):
-                cookie = jar.filter_cookies(client_info.CLIENT_URL)
-                if "auth-token" not in cookie or not cookie["auth-token"].value:
-                    self.access_token = await self._oauth_device_login()
-                    cookie["auth-token"] = self.access_token
-                elif not self.access_token:
-                    self._worker.log("Восстановление сессии из cookies.jar")
-                    self.access_token = cookie["auth-token"].value
-
-                async with self._worker.request(
-                    "GET",
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {self.access_token}"},
-                ) as response:
-                    if response.status == 401:
-                        self._worker.log("Сохранённая сессия устарела, требуется переавторизация")
-                        self.access_token = ""
-                        if client_info.CLIENT_URL.host is not None:
-                            jar.clear_domain(client_info.CLIENT_URL.host)
-                        self._worker.cookies_path.unlink(missing_ok=True)
-                        continue
-                    if response.status == 200:
-                        validate_response = await response.json()
-                        break
-            else:
-                raise LoginException("Login verification failure (token validation)")
-
-            assert validate_response is not None
-            if validate_response.get("client_id") == client_info.CLIENT_ID:
-                break
-            self._worker.log("Несовпадение Client-ID cookie, очистка сессии")
-            self.access_token = ""
-            jar.clear()
-            self._worker.cookies_path.unlink(missing_ok=True)
-        else:
-            raise LoginException("Login verification failure (client_id mismatch)")
-
-        self.user_id = int(validate_response["user_id"])
-        self.username = str(validate_response.get("login") or self.username or self.user_id)
-        self.auth_status = f"Авторизован ({self.username})"
-        self._worker.config.user_id = self.user_id
-        self._worker.config.username = self.username
-        self._worker.config.save(self._worker.profiles_dir)
-
-        cookie = jar.filter_cookies(client_info.CLIENT_URL)
-        cookie["auth-token"] = self.access_token
-        cookie["persistent"] = str(self.user_id)
-        jar.update_cookies(cookie, client_info.CLIENT_URL)
-        self._worker.cookies_path.parent.mkdir(parents=True, exist_ok=True)
-        jar.save(self._worker.cookies_path)
-
-        self._logged_in.set()
-        self._worker.log(f"Вход выполнен: {self.username} (ID: {self.user_id})")
-        self._worker.notify_ui_update()
-
-
-class AccountWorker:
+class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
     """Isolated async miner worker for a single Twitch account profile."""
 
     def __init__(
@@ -350,15 +119,16 @@ class AccountWorker:
         self._on_log_cb = on_log
         self._on_claim_cb = on_claim
 
-        self.cookies_path: Path = AccountProfileConfig.cookies_path(self.name, self.profiles_dir)
-        self.log_path: Path = AccountProfileConfig.log_path(self.name, self.profiles_dir)
+        self.cookies_path = AccountProfileConfig.cookies_path(self.name, self.profiles_dir)
+        self.log_path = AccountProfileConfig.log_path(self.name, self.profiles_dir)
 
         self._client_type: ClientInfo = ClientType.SMARTBOX
         self.user_agent: str = config.user_agent or ClientType.SMARTBOX.pick_user_agent()
         self._proxy_in_connector: bool = False
         self._session: aiohttp.ClientSession | None = None
         self._gql_limiter = RateLimiter(capacity=5, window=1)
-        self._auth_state = _WorkerAuthState(self)
+        self._auth_state = WorkerAuthState(self)
+        self._crash_backoff = ExponentialBackoff(base=2, shift=5, maximum=300)
 
         self._state: State = State.IDLE
         self._state_change = asyncio.Event()
@@ -375,7 +145,7 @@ class AccountWorker:
         self.watching_channel: AwaitableValue[Channel] = AwaitableValue()
         self.is_standby: bool = False
         self.claimed_count: int = 0
-        self.status_text: str = "Остановлен"
+        self.status_text: str = self._t("status_stopped")
         self.last_error: str = ""
         self.log_buffer: deque[str] = deque(maxlen=200)
         self.ws_statuses: dict[int, tuple[str, int]] = {}
@@ -385,6 +155,9 @@ class AccountWorker:
         self._watching_task: asyncio.Task[None] | None = None
         self._mnt_task: asyncio.Task[None] | None = None
         self._file_handler: logging.FileHandler | None = None
+
+    def _t(self, key: str, **kwargs: Any) -> str:
+        return tr(key, getattr(self.global_settings, "language", "ru"), **kwargs)
 
     @property
     def user_id(self) -> int | None:
@@ -448,9 +221,9 @@ class AccountWorker:
 
     def on_critical_error(self, exc: BaseException) -> None:
         self.last_error = str(exc)
-        self.status_text = f"Ошибка: {exc}"
-        self.log(f"Критическая ошибка задачи: {exc}", level=logging.ERROR)
-        self.stop_nowait()
+        self.status_text = self._t("err_critical", error=exc)
+        self.log(self._t("log_critical_restart", error=exc), level=logging.ERROR)
+        self.change_state(State.RESTART)
 
     def record_claimed_drop(self, drop: Any) -> None:
         self.claimed_count += 1
@@ -462,7 +235,7 @@ class AccountWorker:
             campaign_name=drop.campaign.name,
             image_url=drop.primary_image_url,
         )
-        self.log(f"Дроп получен: {rec.game_name} — {rec.drop_name}")
+        self.log(self._t("log_drop_claimed", game=rec.game_name, drop=rec.drop_name))
         if self._on_claim_cb is not None:
             self._on_claim_cb(rec)
         self.notify_ui_update()
@@ -491,7 +264,7 @@ class AccountWorker:
             return
         self._stop_event.clear()
         self.last_error = ""
-        self.status_text = "Запуск..."
+        self.status_text = self._t("status_starting")
         self._setup_file_logger()
         self._main_task = asyncio.create_task(self.run())
         self.notify_ui_update()
@@ -507,7 +280,7 @@ class AccountWorker:
                 await asyncio.wait_for(self._main_task, timeout=5)
             self._main_task = None
         await self.shutdown()
-        self.status_text = "Остановлен"
+        self.status_text = self._t("status_stopped")
         self.notify_ui_update()
 
     def trigger_inventory_refresh(self) -> None:
@@ -518,29 +291,6 @@ class AccountWorker:
         self._auth_state.invalidate(delete_cookies=True)
         if self.running:
             self.change_state(State.RESTART)
-
-    async def get_session(self) -> aiohttp.ClientSession:
-        if self._session is not None and not self._session.closed:
-            return self._session
-        cookie_jar = aiohttp.CookieJar()
-        try:
-            if self.cookies_path.exists():
-                cookie_jar.load(self.cookies_path)
-        except Exception:
-            cookie_jar.clear()
-
-        cq = max(1, min(6, self.global_settings.connection_quality))
-        timeout = aiohttp.ClientTimeout(sock_connect=5 * cq, total=10 * cq)
-        proxy = self.proxy_url or None
-        self._proxy_in_connector = is_socks_proxy(proxy)
-        connector = make_connector(proxy, limit=30)
-        self._session = aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector,
-            cookie_jar=cookie_jar,
-            headers={"User-Agent": self.user_agent},
-        )
-        return self._session
 
     async def shutdown(self) -> None:
         self.stop_watching()
@@ -557,12 +307,14 @@ class AccountWorker:
         await self.websocket.stop(clear_topics=True)
         if self._session is not None:
             jar = cast(aiohttp.CookieJar, self._session.cookie_jar)
-            for cookie_key, cookie in list(jar._cookies.items()):
-                if not cookie:
-                    del jar._cookies[cookie_key]
-            with suppress(Exception):
-                self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
-                jar.save(self.cookies_path)
+            if self._auth_state.access_token or any(True for _ in jar):
+                with suppress(Exception):
+                    save_cookie_jar_protected(
+                        jar,
+                        self.cookies_path,
+                        self._client_type.CLIENT_URL,
+                        self._auth_state.access_token,
+                    )
             await self._session.close()
             self._session = None
         for ch in self.channels.values():
@@ -584,157 +336,55 @@ class AccountWorker:
             self._state = state
         self._state_change.set()
 
-    async def get_auth(self) -> _WorkerAuthState:
+    async def get_auth(self) -> WorkerAuthState:
         await self._auth_state.validate()
         return self._auth_state
 
-    @asynccontextmanager
-    async def request(
-        self, method: str, url: URL | str, *, invalidate_after: datetime | None = None, **kwargs: Any
-    ) -> abc.AsyncIterator[aiohttp.ClientResponse]:
-        session = await self.get_session()
-        method = method.upper()
-        if self.proxy_url and not self._proxy_in_connector and "proxy" not in kwargs:
-            kwargs["proxy"] = self.proxy_url
-        session_timeout = timedelta(seconds=session.timeout.total or 0)
-        backoff = ExponentialBackoff(maximum=90)
-        for delay in backoff:
-            if self._stop_event.is_set():
-                raise ExitRequest()
-            if invalidate_after is not None and datetime.now(timezone.utc) >= (
-                invalidate_after - session_timeout
-            ):
-                raise RequestInvalid()
-            response: aiohttp.ClientResponse | None = None
-            try:
-                response = await session.request(method, url, **kwargs)
-                if response.status < 500:
-                    await response.read()
-                    yield response
-                    return
-                self.log(f"Сервер недоступен ({response.status}), повтор через {round(delay)}с", level=logging.WARNING)
-            except aiohttp.ClientConnectorCertificateError:
-                raise
-            except (
-                aiohttp.ClientConnectionError,
-                asyncio.TimeoutError,
-                aiohttp.ClientPayloadError,
-            ) as exc:
-                if backoff.steps > 1:
-                    self.log(f"Сетевая ошибка ({exc}), повтор через {round(delay)}с", level=logging.WARNING)
-            finally:
-                if response is not None:
-                    response.release()
+    async def _recover_after_restart(self, delay: float = 0.0) -> bool:
+        await self.shutdown()
+        if delay > 0:
             await self.sleep_or_stop(delay)
-        raise RequestException("Request retry loop exhausted")
-
-    @overload
-    async def gql_request(self, ops: GQLOperation) -> JsonType: ...
-
-    @overload
-    async def gql_request(self, ops: list[GQLOperation]) -> list[JsonType]: ...
-
-    async def gql_request(
-        self, ops: GQLOperation | list[GQLOperation]
-    ) -> JsonType | list[JsonType]:
-        backoff = ExponentialBackoff(maximum=60)
-        single_retry = True
-        for delay in backoff:
-            if self._stop_event.is_set():
-                raise ExitRequest()
-            async with self._gql_limiter:
-                auth_state = await self.get_auth()
-                async with self.request(
-                    "POST",
-                    "https://gql.twitch.tv/gql",
-                    json=ops,
-                    headers=auth_state.headers(user_agent=self.user_agent, gql=True),
-                ) as response:
-                    response_json: JsonType | list[JsonType] = await response.json()
-            orig_response = response_json
-            response_list = response_json if isinstance(response_json, list) else [response_json]
-            force_retry = False
-            for item in response_list:
-                if "errors" in item:
-                    for error_dict in item["errors"]:
-                        msg = error_dict.get("message", "")
-                        if single_retry and msg in ("service error", "PersistedQueryNotFound"):
-                            single_retry = False
-                            delay = max(delay, 5.0)
-                            force_retry = True
-                            break
-                        if msg == "server error":
-                            data_dict: JsonType = item["data"]
-                            path: list[str] = error_dict.get("path", [])
-                            for key in path[:-1]:
-                                data_dict = data_dict[key]
-                            if path:
-                                data_dict[path[-1]] = None
-                            break
-                        if msg in (
-                            "service timeout",
-                            "request cancelled",
-                            "service unavailable",
-                            "context deadline exceeded",
-                        ):
-                            force_retry = True
-                            break
-                    else:
-                        raise GQLException(item["errors"])
-                elif "error" in item:
-                    raise GQLException(f"{item['error']}: {item.get('message')}")
-                if force_retry:
-                    break
-            else:
-                return orig_response
-            await self.sleep_or_stop(delay)
-        raise GQLException("GQL retry loop exhausted")
-
-    def _merge_data(self, primary_data: JsonType, secondary_data: JsonType) -> JsonType:
-        merged: JsonType = {}
-        for key in set(primary_data.keys()) | set(secondary_data.keys()):
-            if key in primary_data and key in secondary_data:
-                vp = primary_data[key]
-                vs = secondary_data[key]
-                if isinstance(vp, dict) and isinstance(vs, dict):
-                    merged[key] = self._merge_data(vp, vs)
-                else:
-                    merged[key] = vp
-            elif key in primary_data:
-                merged[key] = primary_data[key]
-            else:
-                merged[key] = secondary_data[key]
-        return merged
+        if self._stop_event.is_set():
+            return False
+        self._state = State.IDLE
+        self._state_change.clear()
+        self._setup_file_logger()
+        return True
 
     async def run(self) -> None:
+        crash_iter = iter(self._crash_backoff)
         while not self._stop_event.is_set():
             try:
                 await self._run()
                 break
             except ReloadRequest:
-                self.log("Перезапуск воркера...")
-                await self.shutdown()
-                self._setup_file_logger()
+                self.log(self._t("worker_restarting"))
+                if not await self._recover_after_restart():
+                    break
             except (ExitRequest, asyncio.CancelledError):
                 break
             except LoginException as exc:
                 self.last_error = str(exc)
-                self.status_text = f"Ошибка входа: {exc}"
-                self.log(f"Ошибка входа: {exc}", level=logging.ERROR)
-                break
+                delay = round(next(crash_iter))
+                self.status_text = self._t("err_login", error=exc)
+                self.log(self._t("worker_login_retry", error=exc, delay=delay), level=logging.ERROR)
+                if not await self._recover_after_restart(delay):
+                    break
             except Exception as exc:
                 self.last_error = str(exc)
-                self.status_text = f"Ошибка: {exc}"
-                self.log(f"Сбой воркера: {exc}", level=logging.ERROR)
-                logger.exception(f"[{self.name}] Worker crashed")
-                break
+                delay = round(next(crash_iter))
+                self.status_text = self._t("err_critical", error=exc)
+                self.log(self._t("worker_crash_retry", error=exc, delay=delay), level=logging.ERROR)
+                logger.exception(f"[{self.name}] Worker crashed; retrying in {delay}s")
+                if not await self._recover_after_restart(delay):
+                    break
         await self.shutdown()
         if self._stop_event.is_set() and not self.last_error:
-            self.status_text = "Остановлен"
+            self.status_text = self._t("status_stopped")
         self.notify_ui_update()
 
     async def _run(self) -> None:
-        self.status_text = "Авторизация..."
+        self.status_text = self._t("status_auth")
         self.notify_ui_update()
         auth_state = await self.get_auth()
         await self.websocket.start()
@@ -758,14 +408,16 @@ class AccountWorker:
         while not self._stop_event.is_set():
             if self._state is State.IDLE:
                 self.stop_watching()
-                self.status_text = "Ожидание кампаний (IDLE)"
+                self.status_text = self._t("status_idle")
                 self.notify_ui_update()
                 self._state_change.clear()
             elif self._state is State.INVENTORY_FETCH:
-                self.status_text = "Синхронизация инвентаря..."
+                self.status_text = self._t("status_inv_sync")
                 self.notify_ui_update()
                 await self.websocket.start()
                 await self.fetch_inventory()
+                self._crash_backoff.reset()
+                self.last_error = ""
                 self.change_state(State.GAMES_UPDATE)
             elif self._state is State.GAMES_UPDATE:
                 for campaign in self.inventory:
@@ -778,7 +430,7 @@ class AccountWorker:
                 self.restart_watching()
                 self.change_state(State.CHANNELS_CLEANUP)
             elif self._state is State.CHANNELS_CLEANUP:
-                self.status_text = "Очистка каналов..."
+                self.status_text = self._t("status_cleanup")
                 if not self.wanted_games or full_cleanup:
                     to_remove = list(channels.values())
                 else:
@@ -804,10 +456,10 @@ class AccountWorker:
                 if self.wanted_games or self.global_settings.standby_on_pinned:
                     self.change_state(State.CHANNELS_FETCH)
                 else:
-                    self.log("Нет активных кампаний для фарма.")
+                    self.log(self._t("status_no_campaigns"))
                     self.change_state(State.IDLE)
             elif self._state is State.CHANNELS_FETCH:
-                self.status_text = "Поиск стримов..."
+                self.status_text = self._t("status_searching")
                 self.notify_ui_update()
                 await self._fetch_channels()
                 self.change_state(State.CHANNEL_SWITCH)
@@ -822,225 +474,16 @@ class AccountWorker:
             if not self._state_change.is_set():
                 await self._state_change.wait()
 
-    def effective_priority_games(self) -> list[str]:
-        fav_ids = set(self.global_settings.favorite_campaigns)
-        fav_games = [c.game.name for c in self.inventory if c.id in fav_ids]
-        preset = getattr(self.global_settings, "radar_preset", "default")
-        base_priority = list(self.global_settings.priority_games)
-        if preset == "pc_games" and not base_priority:
-            known = [c.game.name for c in self.inventory if not c.finished]
-            base_priority = self.radar.get_installed_pc_games(known_games=known)
-        extra_games: list[str] = []
-        if preset == "all_campaigns":
-            extra_games = [c.game.name for c in self.inventory if not c.finished]
-        return deduplicate(
-            [*self.radar.auto_promoted_games, *fav_games, *base_priority, *extra_games]
-        )
-
-    def _compute_wanted_games(self) -> None:
-        self.wanted_games.clear()
-        exclude = set(self.global_settings.exclude_games)
-        fav_ids = set(self.global_settings.favorite_campaigns)
-        priority = self.effective_priority_games()
-        priority_mode = self.global_settings.priority_mode_enum
-        priority_only = priority_mode is PriorityMode.PRIORITY_ONLY
-        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
-
-        sorted_campaigns = list(self.inventory)
-        if not priority_only:
-            if priority_mode is PriorityMode.ENDING_SOONEST:
-                sorted_campaigns.sort(key=lambda c: c.ends_at)
-            elif priority_mode is PriorityMode.LOW_AVBL_FIRST:
-                sorted_campaigns.sort(key=lambda c: c.availability)
-        sorted_campaigns.sort(
-            key=lambda c: priority.index(c.game.name) if c.game.name in priority else MAX_INT
-        )
-        sorted_campaigns.sort(key=lambda c: 0 if c.id in fav_ids else 1)
-        for campaign in sorted_campaigns:
-            game = campaign.game
-            if (
-                game not in self.wanted_games
-                and game.name not in exclude
-                and (not priority_only or game.name in priority)
-                and campaign.can_earn_within(next_hour)
-            ):
-                self.wanted_games.append(game)
-
-    async def _fetch_channels(self) -> None:
-        channels = self.channels
-        new_channels: set[Channel] = set(channels.values())
-        channels.clear()
-
-        no_acl: set[Game] = set()
-        acl_channels: set[Channel] = set()
-        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
-
-        for campaign in self.inventory:
-            if campaign.game in self.wanted_games and campaign.can_earn_within(next_hour):
-                if campaign.allowed_channels:
-                    acl_channels.update(campaign.allowed_channels)
-                else:
-                    no_acl.add(campaign.game)
-
-        # Inject pinned streamers cached in SharedCampaignRadar
-        for st in self.radar.pinned_streams.values():
-            if st.online and st.channel_id and st.raw_channel_data:
-                ch = Channel(
-                    self,
-                    id=st.channel_id,
-                    login=st.login,
-                    display_name=st.display_name or st.login,
-                    pinned=True,
-                )
-                avail_payload = [{"id": cid} for cid in st.active_campaign_ids]
-                ch.external_update(st.raw_channel_data, avail_payload)
-                new_channels.add(ch)
-
-        acl_channels.difference_update(new_channels)
-        await self.bulk_check_online(acl_channels)
-        new_channels.update(acl_channels)
-
-        for game in no_acl:
-            for stream_ch in await self.get_live_streams(game, drops_enabled=True):
-                new_channels.add(stream_ch)
-
-        ordered = sorted(new_channels, key=lambda c: c.viewers if c.viewers is not None else -1, reverse=True)
-        ordered.sort(key=lambda c: c.acl_based, reverse=True)
-        ordered.sort(key=lambda c: c.pinned, reverse=True)
-        ordered.sort(key=self.get_priority)
-
-        to_trim = ordered[MAX_CHANNELS:]
-        ordered = ordered[:MAX_CHANNELS]
-        if to_trim:
-            rm_topics = []
-            for ch in to_trim:
-                rm_topics.append(WebsocketTopic.as_str("Channel", "StreamState", ch.id))
-                rm_topics.append(WebsocketTopic.as_str("Channel", "StreamUpdate", ch.id))
-            self.websocket.remove_topics(rm_topics)
-
-        for ch in ordered:
-            channels[ch.id] = ch
-
-        add_topics: list[WebsocketTopic] = []
-        for cid in channels:
-            add_topics.append(WebsocketTopic("Channel", "StreamState", cid, self.process_stream_state))
-            add_topics.append(WebsocketTopic("Channel", "StreamUpdate", cid, self.process_stream_update))
-        self.websocket.add_topics(add_topics)
-
-        watching = self.watching_channel.get_with_default(None)
-        if watching is not None:
-            relinked = channels.get(watching.id)
-            if relinked is not None and (
-                self.can_watch(relinked) or (self.is_standby and relinked.online and relinked.pinned)
-            ):
-                self.watch(relinked, standby=self.is_standby, update_status=False)
-            else:
-                self.stop_watching()
-
-    def _switch_channel(self) -> None:
-        new_watching: Channel | None = None
-        new_standby = False
-        candidates = sorted(
-            self.channels.values(),
-            key=lambda c: (
-                self.get_priority(c),
-                0 if c.pinned else 1,
-                0 if c.acl_based else 1,
-                -(c.viewers or 0),
-            ),
-        )
-        for ch in candidates:
-            if self.should_switch(ch):
-                new_watching = ch
-                new_standby = False
-                break
-
-        current = self.watching_channel.get_with_default(None)
-        if new_watching is not None:
-            self.watch(new_watching, standby=new_standby)
-            return
-        if current is not None and self.can_watch(current):
-            self.is_standby = False
-            self.status_text = f"Смотрит: {current.name}"
-            self.notify_ui_update()
-            return
-
-        # Standby Mode: keep watch warm on highest-viewer live pinned streamer (e.g. kaicenat)
-        if self.global_settings.standby_on_pinned:
-            pinned_online = [
-                ch for ch in self.channels.values() if ch.pinned and ch.online
-            ]
-            pinned_online.sort(key=lambda c: c.viewers or 0, reverse=True)
-            if pinned_online:
-                standby_ch = pinned_online[0]
-                if current is None or current.id != standby_ch.id or not self.is_standby:
-                    self.watch(standby_ch, standby=True)
-                else:
-                    self.status_text = f"Дежурство: {standby_ch.name}"
-                    self.notify_ui_update()
-                return
-
-        self.log("Нет подходящих онлайн-стримов для просмотра.")
-        self.change_state(State.IDLE)
-
-    def get_priority(self, channel: Channel) -> int:
-        priority = self.effective_priority_games()
-        game = channel.game
-        # If channel is verified for a priority campaign (even in Just Chatting), reflect that campaign's priority
-        for cid in channel.available_campaign_ids:
-            camp = self._campaigns.get(cid)
-            if camp is not None and camp.can_earn(channel, ignore_channel_status=True):
-                if camp.game.name in priority:
-                    return priority.index(camp.game.name)
-                if camp.game in self.wanted_games:
-                    return len(priority) + self.wanted_games.index(camp.game)
-        if game is not None:
-            if game.name in priority:
-                return priority.index(game.name)
-            if game in self.wanted_games:
-                return len(priority) + self.wanted_games.index(game)
-        return MAX_INT
-
-    def can_watch(self, channel: Channel) -> bool:
-        if not channel.online:
-            return False
-        for campaign in self.inventory:
-            if campaign.can_earn(channel) and (
-                (channel.game is not None and channel.drops_enabled and channel.game in self.wanted_games)
-                or campaign.game.is_special()
-                or (channel.acl_based and channel in campaign.allowed_channels)
-                or (channel.id in campaign.verified_channel_ids)
-            ):
-                return True
-        return False
-
-    def should_switch(self, channel: Channel) -> bool:
-        if not self.can_watch(channel):
-            return False
-        watching = self.watching_channel.get_with_default(None)
-        if watching is None or self.is_standby or not self.can_watch(watching):
-            return True
-        ch_order = self.get_priority(channel)
-        w_order = self.get_priority(watching)
-        if ch_order < w_order:
-            return True
-        if ch_order == w_order:
-            if channel.pinned > watching.pinned:
-                return True
-            if channel.pinned == watching.pinned and channel.acl_based > watching.acl_based:
-                return True
-        return False
-
     def watch(self, channel: Channel, *, standby: bool = False, update_status: bool = True) -> None:
         self.is_standby = standby
         self.watching_channel.set(channel)
         if update_status:
             if standby:
-                self.status_text = f"Дежурство: {channel.name}"
-                self.log(f"Режим дежурства (Standby) на {channel.name} [{channel.game or 'Online'}]")
+                self.status_text = self._t("status_standby", channel=channel.name)
+                self.log(self._t("log_standby_start", channel=channel.name, game=channel.game or "Online"))
             else:
-                self.status_text = f"Фарм: {channel.name}"
-                self.log(f"Начал просмотр {channel.name} [{channel.game or '?'}]")
+                self.status_text = self._t("status_mining", channel=channel.name)
+                self.log(self._t("log_watch_start", channel=channel.name, game=channel.game or "?"))
         self.notify_ui_update()
 
     def stop_watching(self) -> None:
@@ -1071,8 +514,6 @@ class AccountWorker:
 
     @task_wrapper(critical=True)
     async def _watch_loop(self) -> NoReturn:
-        import random
-
         last_spade_ts = 0.0
         last_gql_sync_ts = 0.0
         while not self._stop_event.is_set():
@@ -1129,7 +570,6 @@ class AccountWorker:
             if needs_resync:
                 for d in active_campaign.drops:
                     d.reset_unconfirmed()
-                # Refresh inventory cleanly without dropping out of the stream
                 try:
                     await self.fetch_inventory(lightweight=True)
                 except MinerException:
@@ -1209,103 +649,6 @@ class AccountWorker:
             if self._mnt_task is not None and not self._mnt_task.done():
                 self._mnt_task.cancel()
             self._mnt_task = asyncio.create_task(self._maintenance_task())
-        self.notify_ui_update()
-
-    def get_active_campaign(self, channel: Channel | None = None) -> DropsCampaign | None:
-        if not self.wanted_games:
-            return None
-        watching = self.watching_channel.get_with_default(channel)
-        if watching is None:
-            return None
-        campaigns = [c for c in self.inventory if c.can_earn(watching)]
-        if not campaigns:
-            return None
-        campaigns.sort(key=lambda c: c.remaining_minutes)
-        return campaigns[0]
-
-    async def get_live_streams(
-        self, game: Game, *, limit: int = 20, drops_enabled: bool = True
-    ) -> list[Channel]:
-        filters: list[str] = ["DROPS_ENABLED"] if drops_enabled else []
-        try:
-            response = await self.gql_request(
-                GQL_QUERIES["GameDirectory"].with_variables(
-                    {
-                        "limit": limit,
-                        "slug": game.slug,
-                        "options": {
-                            "includeRestricted": ["SUB_ONLY_LIVE"],
-                            "systemFilters": filters,
-                        },
-                    }
-                )
-            )
-        except GQLException:
-            return []
-        game_data = (response.get("data") or {}).get("game")
-        if not game_data:
-            return []
-        return [
-            Channel.from_directory(self, edge["node"], drops_enabled=drops_enabled)
-            for edge in (game_data.get("streams", {}).get("edges") or [])
-            if edge.get("node", {}).get("broadcaster") is not None
-        ]
-
-    async def bulk_check_online(self, channels: abc.Iterable[Channel]) -> None:
-        channels_list = list(channels)
-        if not channels_list:
-            return
-        acl_streams_map: dict[int, JsonType] = {}
-        ops = [ch.stream_gql for ch in channels_list]
-        for op_chunk in chunk(ops, 20):
-            responses = await self.gql_request(op_chunk)
-            for resp in responses:
-                user_data = (resp.get("data") or {}).get("user")
-                if user_data is not None:
-                    acl_streams_map[int(user_data["id"])] = user_data
-
-        acl_avail_map: dict[int, list[JsonType]] = {}
-        if self.global_settings.available_drops_check:
-            avail_ops = [
-                GQL_QUERIES["AvailableDrops"].with_variables({"channelID": str(cid)})
-                for cid, cdata in acl_streams_map.items()
-                if cdata.get("stream") is not None
-            ]
-            for op_chunk in chunk(avail_ops, 20):
-                responses = await self.gql_request(op_chunk)
-                for resp in responses:
-                    ch_info = (resp.get("data") or {}).get("channel")
-                    if ch_info:
-                        acl_avail_map[int(ch_info["id"])] = ch_info.get("viewerDropCampaigns") or []
-
-        for ch in channels_list:
-            cdata = acl_streams_map.get(ch.id)
-            if not cdata or not cdata.get("stream"):
-                continue
-            avail = acl_avail_map.get(ch.id, [])
-            ch.external_update(cdata, avail)
-            if avail:
-                await self.radar.ingest_channel_campaigns(
-                    self, avail, channel_id=ch.id, channel_login=ch.login
-                )
-
-    def on_channel_update(
-        self, channel: Channel, stream_before: Stream | None, stream_after: Stream | None
-    ) -> None:
-        if stream_before is None and stream_after is not None:
-            if self.should_switch(channel):
-                self.log(f"{channel.name} вышел в онлайн — переключаюсь.")
-                self.watch(channel, standby=False)
-        elif stream_before is not None:
-            watching = self.watching_channel.get_with_default(None)
-            if watching is not None and watching == channel:
-                if stream_after is None:
-                    self.log(f"{channel.name} завершил стрим.")
-                    self.change_state(State.CHANNEL_SWITCH)
-                elif not self.is_standby and not self.can_watch(channel):
-                    self.change_state(State.CHANNEL_SWITCH)
-            elif stream_after is not None and self.should_switch(channel):
-                self.watch(channel, standby=False)
         self.notify_ui_update()
 
     @task_wrapper

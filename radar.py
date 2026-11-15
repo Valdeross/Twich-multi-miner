@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - non-Windows fallback
 
 import aiohttp
 
+from auth_transport import EgressLimiterRegistry
 from constants import GQL_QUERIES, JsonType, URLType
 from exceptions import MinerException, RequestException
 from utils import chunk, deduplicate, is_socks_proxy, make_connector
@@ -106,6 +107,7 @@ def _scan_steam_games() -> list[str]:
                 sp, _ = winreg.QueryValueEx(k, "SteamPath")
                 if sp:
                     candidates.append(Path(str(sp)))
+    home = Path.home()
     candidates.extend(
         [
             Path(r"C:\Program Files (x86)\Steam"),
@@ -113,6 +115,9 @@ def _scan_steam_games() -> list[str]:
             Path(r"D:\Steam"),
             Path(r"D:\SteamLibrary"),
             Path(r"C:\SteamLibrary"),
+            home / ".steam" / "steam",
+            home / ".local" / "share" / "Steam",
+            home / "Library" / "Application Support" / "Steam",
         ]
     )
 
@@ -156,26 +161,48 @@ def _scan_steam_games() -> list[str]:
 
 def _scan_epic_games() -> list[str]:
     program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
-    manifests_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
-    if not manifests_dir.is_dir():
-        return []
+    home = Path.home()
+    manifest_dirs = [
+        program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests",
+        home / "Library" / "Application Support" / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests",
+    ]
     found: list[str] = []
-    for item in manifests_dir.glob("*.item"):
+    for manifests_dir in manifest_dirs:
+        if not manifests_dir.is_dir():
+            continue
+        for item in manifests_dir.glob("*.item"):
+            with suppress(OSError, ValueError, TypeError):
+                data = json.loads(item.read_text(encoding="utf-8", errors="ignore"))
+                if not isinstance(data, dict):
+                    continue
+                if not bool(data.get("bIsApplication", True)):
+                    continue
+                if not str(data.get("LaunchExecutable") or "").strip():
+                    continue
+                main_app = str(data.get("MainGameAppName") or "").strip()
+                app_name = str(data.get("AppName") or "").strip()
+                if main_app and main_app != app_name:
+                    continue
+                disp = str(data.get("DisplayName") or "").strip()
+                if disp and not _is_non_game_app(disp):
+                    found.append(disp)
+
+    # Linux Heroic / Legendary manifests
+    for alt_file in (
+        home / ".config" / "heroic" / "installed.json",
+        home / ".config" / "legendary" / "installed.json",
+    ):
+        if not alt_file.is_file():
+            continue
         with suppress(OSError, ValueError, TypeError):
-            data = json.loads(item.read_text(encoding="utf-8", errors="ignore"))
-            if not isinstance(data, dict):
-                continue
-            if not bool(data.get("bIsApplication", True)):
-                continue
-            if not str(data.get("LaunchExecutable") or "").strip():
-                continue
-            main_app = str(data.get("MainGameAppName") or "").strip()
-            app_name = str(data.get("AppName") or "").strip()
-            if main_app and main_app != app_name:
-                continue
-            disp = str(data.get("DisplayName") or "").strip()
-            if disp and not _is_non_game_app(disp):
-                found.append(disp)
+            payload = json.loads(alt_file.read_text(encoding="utf-8", errors="ignore"))
+            entries = payload.values() if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                title = str(entry.get("title") or entry.get("app_title") or "").strip()
+                if title and not _is_non_game_app(title):
+                    found.append(title)
     return found
 
 
@@ -265,7 +292,7 @@ def _scan_registry_games() -> list[str]:
 
 
 def scan_installed_pc_games() -> list[str]:
-    """Scan installed PC games across Steam, Epic, Riot, GOG, Ubisoft, and known publishers."""
+    """Scan installed PC games locally across launchers/manifests (strictly offline, never transmitted)."""
     raw_names: list[str] = [
         *_scan_steam_games(),
         *_scan_epic_games(),
@@ -323,6 +350,7 @@ class SharedCampaignRadar:
         self.last_radar_error: str = ""
         self._pc_games_cache: list[str] = []
         self._pc_games_scanned_at: float = 0.0
+        self.egress_limiters = EgressLimiterRegistry(capacity=5, window=1)
 
     def sync_pinned_list(self) -> None:
         desired = {s.strip().lower() for s in self.global_settings.pinned_streamers if s.strip()}
@@ -630,6 +658,7 @@ class SharedCampaignRadar:
     def get_installed_pc_games(
         self, *, force: bool = False, known_games: Iterable[str] = ()
     ) -> list[str]:
+        """Return locally installed games matched against known campaign names (strictly local-only; never sent externally)."""
         now = time()
         if force or not self._pc_games_cache or (now - self._pc_games_scanned_at) >= 60.0:
             self._pc_games_cache = scan_installed_pc_games()
