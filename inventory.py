@@ -83,13 +83,21 @@ class BaseDrop:
         if isinstance(self_edge, dict):
             self.claim_id = self_edge.get("dropInstanceID")
             self.is_claimed = bool(self_edge.get("isClaimed", False))
-        elif (
-            dts := [
-                claimed_benefits[bid]
-                for benefit in self.benefits
-                if (bid := benefit.id) in claimed_benefits
-            ]
-        ) and all(self.starts_at <= dt < self.ends_at for dt in dts):
+        if not self.is_claimed and self.id in getattr(self._worker, "_claimed_drop_ids", ()):
+            self.is_claimed = True
+        if (
+            not self.is_claimed
+            and self.benefits
+            and (
+                dts := [
+                    claimed_benefits[bid]
+                    for benefit in self.benefits
+                    if (bid := benefit.id) in claimed_benefits
+                ]
+            )
+            and len(dts) == len(self.benefits)
+            and all(self.starts_at <= dt < self.ends_at for dt in dts)
+        ):
             self.is_claimed = True
         self.precondition_drops: list[str] = [
             d["id"] for d in (data.get("preconditionDrops") or [])
@@ -176,32 +184,45 @@ class BaseDrop:
         return await self.claim()
 
     async def claim(self) -> bool:
-        result = await self._claim()
-        if result:
+        status = await self._claim_status()
+        if status == "CLAIMED_NEW":
             self.is_claimed = True
             self._worker.record_claimed_drop(self)
-        else:
-            logger.error(f"[{self._worker.name}] Drop claim failed! Drop ID: {self.id}")
-        return result
+            return True
+        if status == "ALREADY_CLAIMED":
+            self.is_claimed = True
+            if hasattr(self._worker, "_claimed_drop_ids"):
+                self._worker._claimed_drop_ids.add(self.id)
+            return True
+        logger.error(f"[{self._worker.name}] Drop claim failed! Drop ID: {self.id}")
+        return False
 
     async def _claim(self) -> bool:
+        return (await self._claim_status()) in ("CLAIMED_NEW", "ALREADY_CLAIMED")
+
+    async def _claim_status(self) -> str:
         if self.is_claimed:
-            return True
+            return "ALREADY_CLAIMED"
         if not self.can_claim:
-            return False
+            return "FAILED"
         try:
             response = await self._worker.gql_request(
                 GQL_QUERIES["ClaimDrop"].with_variables({"input": {"dropInstanceID": self.claim_id}})
             )
         except GQLException:
-            return False
+            return "FAILED"
         data = response.get("data", {})
         if data.get("errors"):
-            return False
+            return "FAILED"
         claim_res = data.get("claimDropRewards")
         if not claim_res:
-            return False
-        return claim_res.get("status") in ("ELIGIBLE_FOR_ALL", "DROP_INSTANCE_ALREADY_CLAIMED")
+            return "FAILED"
+        st = claim_res.get("status")
+        if st == "ELIGIBLE_FOR_ALL":
+            return "CLAIMED_NEW"
+        if st == "DROP_INSTANCE_ALREADY_CLAIMED":
+            return "ALREADY_CLAIMED"
+        return "FAILED"
 
 
 class TimedDrop(BaseDrop):

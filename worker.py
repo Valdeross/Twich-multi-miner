@@ -147,6 +147,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self.watching_channel: AwaitableValue[Channel] = AwaitableValue()
         self.is_standby: bool = False
         self.claimed_count: int = 0
+        self._claimed_drop_ids: set[str] = set()
         self.status_text: str = self._t("status_stopped")
         self.last_error: str = ""
         self.log_buffer: deque[str] = deque(maxlen=200)
@@ -224,6 +225,11 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self.change_state(State.RESTART)
 
     def record_claimed_drop(self, drop: Any) -> None:
+        drop_id = str(getattr(drop, "id", "") or "")
+        if drop_id:
+            if drop_id in self._claimed_drop_ids:
+                return
+            self._claimed_drop_ids.add(drop_id)
         self.claimed_count += 1
         rec = ClaimedDropRecord(
             timestamp_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -552,18 +558,20 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             # Active GQL drop progress sync every ~55s (solves WS delays & triggers auto-claim)
             if not self.is_standby and (time() - last_gql_sync_ts) >= 55.0:
                 last_gql_sync_ts = time()
-                await self._sync_active_drop_progress(channel)
+                await self._sync_active_drop_progress(channel, watch_ok=succeeded)
 
             interval = random.uniform(WATCH_INTERVAL_MIN, WATCH_INTERVAL_MAX)
             await self._watch_sleep(max(1.0, interval - 10.0))
 
-    async def _sync_active_drop_progress(self, channel: Channel) -> None:
+    async def _sync_active_drop_progress(self, channel: Channel, *, watch_ok: bool = True) -> None:
         drop_data: JsonType | None = None
+        gql_ok = False
         try:
             context = await self.gql_request(
                 GQL_QUERIES["CurrentDrop"].with_variables({"channelID": str(channel.id)})
             )
             drop_data = (context.get("data") or {}).get("currentUser", {}).get("dropCurrentSession")
+            gql_ok = True
         except GQLException:
             drop_data = None
 
@@ -577,15 +585,18 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
                     self.change_state(State.INVENTORY_FETCH)
                 return
 
-        if (active_campaign := self.get_active_campaign(channel)) is not None:
-            needs_resync = active_campaign.bump_minutes(channel)
-            if needs_resync:
-                for d in active_campaign.drops:
-                    d.reset_unconfirmed()
-                try:
-                    await self.fetch_inventory(lightweight=True)
-                except MinerException:
-                    pass
+        # Only estimate +1 local minute when the watch pulse succeeded AND CurrentDrop GQL itself failed;
+        # otherwise wait for real Twitch progress instead of inflating local minutes that later roll back.
+        if watch_ok and not gql_ok:
+            if (active_campaign := self.get_active_campaign(channel)) is not None:
+                needs_resync = active_campaign.bump_minutes(channel)
+                if needs_resync:
+                    for d in active_campaign.drops:
+                        d.reset_unconfirmed()
+                    try:
+                        await self.fetch_inventory(lightweight=True)
+                    except MinerException:
+                        pass
 
     @task_wrapper(critical=True)
     async def _maintenance_task(self) -> None:

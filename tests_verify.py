@@ -1249,6 +1249,98 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_prevent_infinite_reclaim_on_already_claimed_and_claimed_benefits(self) -> None:
+        async def run() -> None:
+            worker = self._make_worker("reclaim_acc")
+            now = datetime.now(timezone.utc)
+            payload = _make_campaign_payload(
+                cid="camp_fragpunk",
+                name="FragPunk Drops",
+                game_id="9001",
+                game_name="FragPunk",
+                required_minutes=30,
+            )
+            payload["timeBasedDrops"][0]["self"] = {
+                "isClaimed": False,
+                "dropInstanceID": "inst_1",
+                "currentMinutesWatched": 30,
+            }
+            payload["timeBasedDrops"][0]["benefitEdges"] = [
+                {"benefit": {"id": "ben_molotov", "name": "Molotov Cocktail", "distributionType": "DIRECT_ENTITLEMENT"}}
+            ]
+
+            async def fake_gql(op):
+                return {"data": {"claimDropRewards": {"status": "DROP_INSTANCE_ALREADY_CLAIMED"}}}
+
+            worker.gql_request = fake_gql  # type: ignore[method-assign]
+            camp = DropsCampaign(worker, payload, {})
+            drop = list(camp.drops)[0]
+            self.assertFalse(drop.is_claimed)
+            ok = await drop.claim()
+            self.assertTrue(ok)
+            self.assertTrue(drop.is_claimed)
+            self.assertEqual(worker.claimed_count, 0)
+            self.assertFalse(any("Дроп получен" in line for line in worker.log_buffer))
+
+            # Rebuild campaign with stale self.isClaimed=False: _claimed_drop_ids and claimed_benefits both mark it claimed
+            camp2 = DropsCampaign(worker, payload, {"ben_molotov": now})
+            self.assertTrue(list(camp2.drops)[0].is_claimed)
+
+            # record_claimed_drop deduplicates same drop.id
+            worker._claimed_drop_ids.clear()
+            worker.record_claimed_drop(drop)
+            worker.record_claimed_drop(drop)
+            self.assertEqual(worker.claimed_count, 1)
+
+        asyncio.run(run())
+
+    def test_sync_progress_no_fake_bump_when_watch_fails_or_current_drop_none(self) -> None:
+        from exceptions import GQLException
+
+        async def run() -> None:
+            worker = self._make_worker("sync_acc")
+            payload = _make_campaign_payload(
+                cid="camp_sync",
+                name="Sync Drops",
+                game_id="9002",
+                game_name="SyncGame",
+                required_minutes=60,
+            )
+            camp = DropsCampaign(worker, payload, {})
+            worker.inventory = [camp]
+            worker.wanted_games = [camp.game]
+            ch = Channel(worker, id=321, login="sync_ch", display_name="SyncCh")
+            ch._stream = Stream(
+                ch,
+                id=32101,
+                title="Drops!",
+                game={"id": "9002", "name": "SyncGame"},
+                viewers=500,
+            )
+            ch._stream.drops_enabled = True
+            worker.channels[321] = ch
+            worker.watching_channel.set(ch)
+
+            async def fake_current_drop_none(op):
+                return {"data": {"currentUser": {"dropCurrentSession": None}}}
+
+            worker.gql_request = fake_current_drop_none  # type: ignore[method-assign]
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            drop0 = list(camp.drops)[0]
+            self.assertEqual(drop0.extra_current_minutes, 0)
+
+            async def fake_current_drop_err(op):
+                raise GQLException("temp error")
+
+            worker.gql_request = fake_current_drop_err  # type: ignore[method-assign]
+            await worker._sync_active_drop_progress(ch, watch_ok=False)
+            self.assertEqual(drop0.extra_current_minutes, 0)
+
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            self.assertEqual(drop0.extra_current_minutes, 1)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
