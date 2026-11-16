@@ -326,6 +326,16 @@ class DesktopBridge:
 
         fav_set = set(self.orchestrator.global_settings.favorite_campaigns)
         exclusive_id = str(self.orchestrator.global_settings.exclusive_campaign_id or "").strip()
+        live_open_games: set[str] = set()
+        for w in list(self.orchestrator.workers.values()):
+            for ch in list(w.channels.values()):
+                if ch.online and ch.drops_enabled and ch.game is not None:
+                    live_open_games.add(ch.game.name.lower())
+        live_radar_camp_ids: dict[str, set[int]] = {}
+        for st in list(self.orchestrator.radar.pinned_streams.values()):
+            if st.online and st.channel_id:
+                for rcid in st.active_campaign_ids:
+                    live_radar_camp_ids.setdefault(rcid, set()).add(st.channel_id)
         campaigns_out: list[dict[str, Any]] = []
         for acc_name, worker in list(self.orchestrator.workers.items()):
             for camp in list(worker.inventory):
@@ -360,6 +370,22 @@ class DesktopBridge:
                                 "benefits": benefits_list,
                             }
                         )
+                    live_count = 0
+                    if camp.active and not camp.finished and camp.eligible:
+                        live_count = sum(
+                            1
+                            for ch in list(worker.channels.values())
+                            if ch.online and camp.can_earn(ch)
+                        )
+                        if live_count == 0:
+                            radar_ch_ids = live_radar_camp_ids.get(camp.id, set())
+                            if camp.allowed_channels:
+                                acl_ids = {ch.id for ch in camp.allowed_channels}
+                                live_count = len(radar_ch_ids & acl_ids)
+                            else:
+                                live_count = len(radar_ch_ids)
+                                if live_count == 0 and camp.game.name.lower() in live_open_games:
+                                    live_count = 1
                     campaigns_out.append(
                         {
                             "account": acc_name,
@@ -370,6 +396,8 @@ class DesktopBridge:
                             "source_url": camp_img_src,
                             "is_favorite": bool(camp.id in fav_set),
                             "is_exclusive": bool(exclusive_id and camp.id == exclusive_id),
+                            "has_live_stream": bool(live_count > 0),
+                            "live_stream_count": int(live_count),
                             "linked": bool(camp.linked),
                             "eligible": bool(camp.eligible),
                             "active": bool(camp.active),

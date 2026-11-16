@@ -994,6 +994,19 @@
       border-color: var(--accent, #2f81f7);
     }
 
+    .live-stream-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: var(--r-sm);
+      border: 1px solid rgba(46, 160, 67, 0.45);
+      background: rgba(46, 160, 67, 0.14);
+      color: var(--ok, #3fb950);
+      flex-shrink: 0;
+    }
+
     .campaign-head {
       display: flex;
       align-items: flex-start;
@@ -3097,6 +3110,12 @@
                 .join("");
 
               const starSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="${fav ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+              const liveTitle = (c.live_stream_count || 0) > 1
+                ? `В эфире: ${c.live_stream_count} стрим(ов) для выполнения`
+                : "Есть активный стрим для выполнения";
+              const liveBadgeHtml = c.has_live_stream
+                ? `<span class="live-stream-badge" title="${escapeHtml(liveTitle)}" aria-label="${escapeHtml(liveTitle)}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg></span>`
+                : "";
 
               return `
                 <div class="campaign-card${fav ? " is-fav" : ""}${excl ? " is-exclusive" : ""}" data-campaign-id="${escapeHtml(c.id)}">
@@ -3114,6 +3133,7 @@
                         aria-pressed="${excl ? "true" : "false"}"
                         title="${excl ? "Снять приоритет (вернуться ко всем кампаниям)" : "Игнорировать все другие кампании и ждать каналы только для этой миссии"}"
                       >${excl ? "В приоритете ✓" : "Выбрать в приоритет"}</button>
+                      ${liveBadgeHtml}
                       <span class="pill ${statusTone}">
                         <span class="dot ${statusTone}"></span>
                         <span>${statusLabel}</span>
