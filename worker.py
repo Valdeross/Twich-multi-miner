@@ -148,6 +148,9 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self.is_standby: bool = False
         self.claimed_count: int = 0
         self._claimed_drop_ids: set[str] = set()
+        self._stalled_channels: dict[int, float] = {}
+        self._zero_progress_streak: int = 0
+        self._zero_progress_channel_id: int | None = None
         self.status_text: str = self._t("status_stopped")
         self.last_error: str = ""
         self.log_buffer: deque[str] = deque(maxlen=200)
@@ -578,12 +581,32 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         if isinstance(drop_data, dict):
             drop = self._drops.get(drop_data.get("dropID", ""))
             if drop is not None and drop.can_earn(channel):
+                self._zero_progress_streak = 0
+                self._zero_progress_channel_id = channel.id
                 mins = int(drop_data.get("currentMinutesWatched") or 0)
                 drop.update_minutes(mins)
                 if drop.ready_to_claim:
                     await drop.ensure_claim()
                     self.change_state(State.INVENTORY_FETCH)
                 return
+
+        # If CurrentDrop GQL succeeded with empty dropID repeatedly while watch pulses succeeded
+        # (e.g. sub-only drop or channel stopped crediting drops), switch to another channel.
+        if watch_ok and gql_ok:
+            if self._zero_progress_channel_id != channel.id:
+                self._zero_progress_channel_id = channel.id
+                self._zero_progress_streak = 1
+            else:
+                self._zero_progress_streak += 1
+            if self._zero_progress_streak >= 3:
+                self._stalled_channels[channel.id] = time() + 900.0
+                self._zero_progress_streak = 0
+                self.log(
+                    f"На канале {channel.name} прогресс дропса не начисляется — переключаюсь на другой канал."
+                )
+                self.stop_watching()
+                self.change_state(State.CHANNEL_SWITCH)
+            return
 
         # Only estimate +1 local minute when the watch pulse succeeded AND CurrentDrop GQL itself failed;
         # otherwise wait for real Twitch progress instead of inflating local minutes that later roll back.

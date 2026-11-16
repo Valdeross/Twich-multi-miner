@@ -1378,6 +1378,51 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_stalled_zero_progress_channel_auto_switches_and_cools_down(self) -> None:
+        from constants import State
+
+        async def run() -> None:
+            worker = self._make_worker("stalled_acc")
+            payload = _make_campaign_payload(
+                cid="camp_stalled",
+                name="Stalled Drops",
+                game_id="9003",
+                game_name="StalledGame",
+                required_minutes=60,
+            )
+            camp = DropsCampaign(worker, payload, {})
+            worker.inventory = [camp]
+            worker._campaigns = {"camp_stalled": camp}
+            worker.wanted_games = [camp.game]
+
+            ch = Channel(worker, id=707, login="stalled_ch", display_name="StalledCh")
+            ch._stream = Stream(
+                ch,
+                id=70701,
+                title="No Drops Credit",
+                game={"id": "9003", "name": "StalledGame"},
+                viewers=100,
+            )
+            ch._stream.drops_enabled = True
+            worker.channels[707] = ch
+            worker.watching_channel.set(ch)
+            self.assertTrue(worker.can_watch(ch))
+
+            async def fake_empty_session(op):
+                return {"data": {"currentUser": {"dropCurrentSession": {"dropID": "", "currentMinutesWatched": 0}}}}
+
+            worker.gql_request = fake_empty_session  # type: ignore[method-assign]
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            self.assertTrue(worker.can_watch(ch))
+
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            self.assertIsNone(worker.watching_channel.get_with_default(None))
+            self.assertEqual(worker._state, State.CHANNEL_SWITCH)
+            self.assertFalse(worker.can_watch(ch))
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

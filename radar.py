@@ -432,6 +432,9 @@ class SharedCampaignRadar:
                     headers={"User-Agent": "TwitchMultiMiner catalog sync"},
                 ) as session:
                     async with session.get(catalog_url, **req_kwargs) as response:
+                        if response.status == 429:
+                            self._catalog_fetched_at = time() + 600.0
+                            raise RequestException("HTTP 429 (backing off 10m)")
                         if response.status != 200:
                             raise RequestException(f"HTTP {response.status}")
                         payload: JsonType = await response.json()

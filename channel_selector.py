@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import abc
 from datetime import datetime, timedelta, timezone
+from time import time
 from typing import TYPE_CHECKING
 
 from channel import Channel, Stream
@@ -219,9 +220,15 @@ class ChannelSelectorMixin:
     def can_watch(self, channel: Channel) -> bool:
         if not channel.online:
             return False
+        stalled_until = getattr(self, "_stalled_channels", {}).get(channel.id, 0.0)
+        if stalled_until > time():
+            return False
         exclusive_id = self._exclusive_campaign_id()
+        avail_ids = set(getattr(channel, "available_campaign_ids", ()) or ())
         for campaign in self.inventory:  # type: ignore[attr-defined]
             if exclusive_id and campaign.id != exclusive_id:
+                continue
+            if avail_ids and campaign.id not in avail_ids:
                 continue
             if campaign.can_earn(channel) and (
                 (channel.game is not None and channel.drops_enabled and channel.game in self.wanted_games)  # type: ignore[attr-defined]
