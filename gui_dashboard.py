@@ -582,7 +582,7 @@ class DesktopBridge:
                 30, min(600, int(payload.get("radar_interval_sec", gs.radar_interval_sec)))
             )
             gs.hybrid_watch_spade = bool(payload.get("hybrid_watch_spade", True))
-            gs.standby_on_pinned = bool(payload.get("standby_on_pinned", True))
+            gs.standby_on_pinned = bool(payload.get("standby_on_pinned", False))
             gs.enable_badges_emotes = bool(payload.get("enable_badges_emotes", True))
             gs.available_drops_check = bool(payload.get("available_drops_check", True))
 

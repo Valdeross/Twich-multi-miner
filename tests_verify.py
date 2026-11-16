@@ -1130,6 +1130,32 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_no_available_drops_does_not_watch_standby_and_notifies(self) -> None:
+        from constants import State
+
+        self.assertFalse(GlobalSettings().standby_on_pinned)
+        worker = self._make_worker("no_drops_acc")
+        worker.inventory = []
+        worker.wanted_games = []
+        self.gs.standby_on_pinned = True
+
+        pinned_ch = Channel(worker, id=555, login="pinned_idle", display_name="PinnedIdle", pinned=True)
+        pinned_ch._stream = Stream(
+            pinned_ch,
+            id=55501,
+            title="Chill stream",
+            game={"id": "509658", "name": "Just Chatting"},
+            viewers=9000,
+        )
+        worker.channels[555] = pinned_ch
+
+        worker._switch_channel()
+        self.assertIsNone(worker.watching_channel.get_with_default(None))
+        self.assertFalse(worker.is_standby)
+        self.assertEqual(worker._state, State.IDLE)
+        self.assertEqual(worker._idle_status_key, "status_no_campaigns")
+        self.assertTrue(any("Доступных наград нет." in line for line in worker.log_buffer))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

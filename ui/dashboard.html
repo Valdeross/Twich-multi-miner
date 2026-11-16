@@ -3213,10 +3213,31 @@
         }
       }
 
+      const noDropsToastShown = {};
+
+      function notifyNoAvailableDrops(data) {
+        const accounts = data.accounts || [];
+        for (const acc of accounts) {
+          const st = String(acc.status_text || "");
+          const isNoDrops =
+            acc.running &&
+            (st.startsWith("Доступных наград нет") || st.startsWith("No available drops"));
+          if (isNoDrops) {
+            if (!noDropsToastShown[acc.name]) {
+              noDropsToastShown[acc.name] = true;
+              showToast(`${acc.name}: доступных наград нет`, "warn");
+            }
+          } else if (!acc.running || (acc.watching_channel && acc.watching_channel !== "—")) {
+            delete noDropsToastShown[acc.name];
+          }
+        }
+      }
+
       function renderCurrentData() {
         const data = state.snapshot;
         if (!data) return;
         renderShellMeta(data);
+        notifyNoAvailableDrops(data);
 
         if (state.activeView === "accounts") {
           renderAccountsMatrix(data);

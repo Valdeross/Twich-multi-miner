@@ -178,8 +178,8 @@ class ChannelSelectorMixin:
             self.notify_ui_update()  # type: ignore[attr-defined]
             return
 
-        # Standby Mode: keep watch warm on highest-viewer live pinned streamer (unless waiting exclusively for one campaign)
-        if self.global_settings.standby_on_pinned and not self._exclusive_campaign_id():  # type: ignore[attr-defined]
+        # Standby Mode: keep watch warm on highest-viewer live pinned streamer only when drop goals exist
+        if self.wanted_games and self.global_settings.standby_on_pinned and not self._exclusive_campaign_id():  # type: ignore[attr-defined]
             pinned_online = [
                 ch for ch in self.channels.values() if ch.pinned and ch.online  # type: ignore[attr-defined]
             ]
@@ -193,7 +193,9 @@ class ChannelSelectorMixin:
                     self.notify_ui_update()  # type: ignore[attr-defined]
                 return
 
-        self.log(self._t("status_no_streams"))  # type: ignore[attr-defined]
+        idle_key = "status_no_streams" if self.wanted_games else "status_no_campaigns"  # type: ignore[attr-defined]
+        self._idle_status_key = idle_key  # type: ignore[attr-defined]
+        self.log(self._t(idle_key))  # type: ignore[attr-defined]
         self.change_state(State.IDLE)  # type: ignore[attr-defined]
 
     def get_priority(self, channel: Channel) -> int:

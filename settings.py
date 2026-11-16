@@ -33,7 +33,7 @@ class GlobalSettings:
     priority_mode: str = "ENDING_SOONEST"
     enable_badges_emotes: bool = True
     available_drops_check: bool = True
-    standby_on_pinned: bool = True
+    standby_on_pinned: bool = False
     radar_interval_sec: int = 120
     hybrid_watch_spade: bool = True
     connection_quality: int = 1
@@ -71,7 +71,7 @@ class GlobalSettings:
             priority_mode=str(raw.get("priority_mode", "ENDING_SOONEST")),
             enable_badges_emotes=bool(raw.get("enable_badges_emotes", True)),
             available_drops_check=bool(raw.get("available_drops_check", True)),
-            standby_on_pinned=bool(raw.get("standby_on_pinned", True)),
+            standby_on_pinned=bool(raw.get("standby_on_pinned", False)),
             radar_interval_sec=max(30, int(raw.get("radar_interval_sec", 120))),
             hybrid_watch_spade=bool(raw.get("hybrid_watch_spade", True)),
             connection_quality=max(1, min(6, int(raw.get("connection_quality", 1)))),

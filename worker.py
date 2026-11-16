@@ -131,6 +131,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self._crash_backoff = ExponentialBackoff(base=2, shift=5, maximum=300)
 
         self._state: State = State.IDLE
+        self._idle_status_key: str = "status_idle"
         self._state_change = asyncio.Event()
         self._stop_event = asyncio.Event()
         self._watching_restart = asyncio.Event()
@@ -415,10 +416,11 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         while not self._stop_event.is_set():
             if self._state is State.IDLE:
                 self.stop_watching()
-                self.status_text = self._t("status_idle")
+                self.status_text = self._t(self._idle_status_key)
                 self.notify_ui_update()
                 self._state_change.clear()
             elif self._state is State.INVENTORY_FETCH:
+                self._idle_status_key = "status_idle"
                 self.status_text = self._t("status_inv_sync")
                 self.notify_ui_update()
                 await self.websocket.start()
@@ -460,11 +462,11 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
                     for ch in to_remove:
                         channels.pop(ch.id, None)
                         ch.remove()
-                if self.wanted_games or (
-                    self.global_settings.standby_on_pinned and not self._exclusive_campaign_id()
-                ):
+                if self.wanted_games:
                     self.change_state(State.CHANNELS_FETCH)
                 else:
+                    self.stop_watching()
+                    self._idle_status_key = "status_no_campaigns"
                     self.log(self._t("status_no_campaigns"))
                     self.change_state(State.IDLE)
             elif self._state is State.CHANNELS_FETCH:
