@@ -41,6 +41,7 @@ from utils import (
     ExponentialBackoff,
     Game,
     RateLimiter,
+    chunk,
     task_wrapper,
     timestamp,
 )
@@ -617,14 +618,72 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         }
         inventory_data: dict[str, JsonType] = {c["id"]: c for c in ongoing_campaigns if c.get("id")}
 
+        dashboard_map: dict[str, JsonType] = {}
+        try:
+            camp_resp = await self.gql_request(GQL_QUERIES["Campaigns"])
+            dash_list = (
+                (camp_resp.get("data") or {}).get("currentUser", {}).get("dropCampaigns") or []
+            )
+            for item in dash_list:
+                if isinstance(item, dict) and item.get("id"):
+                    cid = str(item["id"])
+                    cached_direct = self.radar._direct_campaigns.get(cid)
+                    if cached_direct and cached_direct.get("timeBasedDrops") and not item.get("timeBasedDrops"):
+                        merged_item = dict(cached_direct)
+                        merged_item.update({k: v for k, v in item.items() if v is not None})
+                        dashboard_map[cid] = merged_item
+                    else:
+                        dashboard_map[cid] = item
+        except MinerException:
+            dashboard_map = {}
+
+        if self.user_id is not None:
+            need_details = [
+                cid
+                for cid, item in dashboard_map.items()
+                if item.get("status") in ("ACTIVE", "UPCOMING")
+                and not item.get("timeBasedDrops")
+                and cid not in inventory_data
+            ]
+            for cid_chunk in chunk(need_details, 20):
+                try:
+                    ops = [
+                        GQL_QUERIES["CampaignDetails"].with_variables(
+                            {"channelLogin": str(self.user_id), "dropID": cid}
+                        )
+                        for cid in cid_chunk
+                    ]
+                    det_resps = await self.gql_request(ops)
+                except MinerException:
+                    continue
+                for cid, det_resp in zip(cid_chunk, det_resps):
+                    raw_det = (
+                        (det_resp.get("data") or {}).get("user", {}) or {}
+                    ).get("dropCampaign")
+                    if isinstance(raw_det, dict):
+                        base = dict(dashboard_map.get(cid, {}))
+                        base.update({k: v for k, v in raw_det.items() if v is not None})
+                        dashboard_map[cid] = base
+                        norm = self.radar._normalize_campaign_dict(base)
+                        if norm is not None:
+                            self.radar._direct_campaigns[cid] = norm
+
+        if dashboard_map:
+            inventory_data = self._merge_data(inventory_data, dashboard_map)
+
         if not lightweight:
             await self.radar.poll_pinned_streamers(self)
         public_campaigns = await self.radar.get_merged_public_campaigns(proxy_url=self.proxy_url)
         inventory_data = self._merge_data(inventory_data, public_campaigns)
 
-        for cid in list(inventory_data.keys()):
-            if not inventory_data[cid].get("game"):
-                del inventory_data[cid]
+        for c_data in inventory_data.values():
+            if not c_data.get("game"):
+                c_data["game"] = {
+                    "id": "0",
+                    "name": "Special Events",
+                    "displayName": "Special Events",
+                    "boxArtURL": "",
+                }
 
         campaigns: list[DropsCampaign] = []
         for cid, campaign_data in inventory_data.items():

@@ -1156,6 +1156,99 @@ class TestTwitchMultiMiner(unittest.TestCase):
         self.assertEqual(worker._idle_status_key, "status_no_campaigns")
         self.assertTrue(any("Доступных наград нет." in line for line in worker.log_buffer))
 
+    def test_fetch_inventory_discovers_twitch_dashboard_badge_campaign(self) -> None:
+        async def run() -> None:
+            worker = self._make_worker("qsmp_acc")
+            now = datetime.now(timezone.utc)
+            start_iso = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_iso = (now + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            async def fake_gql(op):
+                if isinstance(op, list):
+                    return [
+                        {
+                            "data": {
+                                "user": {
+                                    "dropCampaign": {
+                                        "id": "camp_qsmp2",
+                                        "name": "Quackity's QSMP2 Season 2",
+                                        "status": "ACTIVE",
+                                        "startAt": start_iso,
+                                        "endAt": end_iso,
+                                        "self": {"isAccountConnected": False},
+                                        "allow": {
+                                            "isEnabled": True,
+                                            "channels": [
+                                                {"id": "101", "name": "QSMP", "displayName": "QSMP"},
+                                                {"id": "102", "name": "Quackity", "displayName": "Quackity"},
+                                            ],
+                                        },
+                                        "game": {"id": "777000", "name": "QSMP", "displayName": "QSMP"},
+                                        "timeBasedDrops": [
+                                            {
+                                                "id": "drop_qsmp2_badge",
+                                                "name": "QSMP2",
+                                                "startAt": start_iso,
+                                                "endAt": end_iso,
+                                                "requiredMinutesWatched": 60,
+                                                "self": {"hasPreconditionsMet": True, "currentMinutesWatched": 0, "isClaimed": False},
+                                                "benefitEdges": [
+                                                    {
+                                                        "benefit": {
+                                                            "id": "ben_qsmp2",
+                                                            "name": "QSMP2",
+                                                            "distributionType": "BADGE",
+                                                            "imageAssetURL": "https://static-cdn.jtvnw.net/badges/v1/test/3",
+                                                        }
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                op_name = getattr(op, "get", lambda *_: None)("operationName")
+                if op_name == "Inventory":
+                    return {"data": {"currentUser": {"inventory": {"dropCampaignsInProgress": [], "gameEventDrops": []}}}}
+                if op_name == "ViewerDropsDashboard":
+                    return {
+                        "data": {
+                            "currentUser": {
+                                "dropCampaigns": [
+                                    {
+                                        "id": "camp_qsmp2",
+                                        "name": "Quackity's QSMP2 Season 2",
+                                        "status": "ACTIVE",
+                                        "startAt": start_iso,
+                                        "endAt": end_iso,
+                                        "game": {"id": "777000", "name": "QSMP", "displayName": "QSMP"},
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                return {"data": {}}
+
+            async def empty_public(*, proxy_url: str = "", force: bool = False):
+                return {}
+
+            worker.gql_request = fake_gql  # type: ignore[method-assign]
+            worker.radar.get_merged_public_campaigns = empty_public  # type: ignore[method-assign]
+
+            await worker.fetch_inventory(lightweight=True)
+            self.assertIn("camp_qsmp2", worker._campaigns)
+            camp = worker._campaigns["camp_qsmp2"]
+            self.assertTrue(camp.has_badge_or_emote)
+            self.assertTrue(camp.eligible)
+            self.assertEqual(len(camp.allowed_channels), 2)
+
+            worker._compute_wanted_games()
+            self.assertEqual([g.name for g in worker.wanted_games], ["QSMP"])
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
