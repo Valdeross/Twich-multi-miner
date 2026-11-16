@@ -371,16 +371,22 @@ class DesktopBridge:
                             }
                         )
                     live_count = 0
-                    if camp.active and not camp.finished and camp.eligible:
-                        live_count = sum(
-                            1
-                            for ch in list(worker.channels.values())
-                            if ch.online and camp.can_earn(ch)
-                        )
+                    if camp.active and not camp.finished:
+                        acl_ids = {ch.id for ch in camp.allowed_channels} if camp.allowed_channels else set()
+                        seen_live_ids: set[int] = set()
+                        for w in list(self.orchestrator.workers.values()):
+                            for ch in list(w.channels.values()):
+                                if not ch.online or ch.id in seen_live_ids:
+                                    continue
+                                if acl_ids:
+                                    if ch.id in acl_ids:
+                                        seen_live_ids.add(ch.id)
+                                elif ch.drops_enabled and ch.game is not None and ch.game == camp.game:
+                                    seen_live_ids.add(ch.id)
+                        live_count = len(seen_live_ids)
                         if live_count == 0:
                             radar_ch_ids = live_radar_camp_ids.get(camp.id, set())
-                            if camp.allowed_channels:
-                                acl_ids = {ch.id for ch in camp.allowed_channels}
+                            if acl_ids:
                                 live_count = len(radar_ch_ids & acl_ids)
                             else:
                                 live_count = len(radar_ch_ids)
