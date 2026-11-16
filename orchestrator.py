@@ -8,7 +8,7 @@ import time
 from collections import deque
 from contextlib import suppress
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from constants import PROFILES_DIR, WORKING_DIR
 from radar import SharedCampaignRadar
@@ -228,7 +228,7 @@ class MultiAccountOrchestrator:
         await asyncio.gather(*(w.stop() for w in self.workers.values()), return_exceptions=True)
         self._emit_change()
 
-    async def force_radar_refresh(self) -> bool:
+    async def force_radar_refresh(self) -> dict[str, Any]:
         """Force immediate radar check across Twitch GQL and public catalog, waking all active workers."""
         authed_worker = self._pick_authenticated_worker()
         found_new = False
@@ -242,7 +242,11 @@ class MultiAccountOrchestrator:
             if worker.running:
                 worker.trigger_inventory_refresh()
         self._emit_change()
-        return found_new
+        return {
+            "ok": authed_worker is not None,
+            "polled": authed_worker is not None,
+            "found_new": found_new,
+        }
 
     def _pick_authenticated_worker(self) -> AccountWorker | None:
         for worker in self.workers.values():

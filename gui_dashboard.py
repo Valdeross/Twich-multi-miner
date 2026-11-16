@@ -567,8 +567,10 @@ class DesktopBridge:
     def poll_radar_now(self) -> dict[str, Any]:
         try:
             fut = self.loop_thread.run_coro(self.orchestrator.force_radar_refresh())
-            ok = bool(fut.result(timeout=12.0))
-            return {"ok": ok}
+            res = fut.result(timeout=12.0)
+            if isinstance(res, dict):
+                return res
+            return {"ok": bool(res)}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

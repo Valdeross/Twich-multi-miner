@@ -1341,6 +1341,43 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_radar_poll_succeeds_even_when_no_new_campaigns_found(self) -> None:
+        from contextlib import suppress
+
+        async def run() -> None:
+            orch = MultiAccountOrchestrator(
+                profiles_dir=self.tmp_path / "profiles_radar_poll",
+                global_settings=self.gs,
+            )
+
+            async def fake_poll(worker, *, force: bool = False):
+                return False
+
+            async def fake_catalog(*, proxy_url: str = "", force: bool = False):
+                return {}
+
+            orch.radar.poll_pinned_streamers = fake_poll  # type: ignore[method-assign]
+            orch.radar.get_catalog_campaigns = fake_catalog  # type: ignore[method-assign]
+
+            res_no_worker = await orch.force_radar_refresh()
+            self.assertFalse(res_no_worker["ok"])
+            self.assertFalse(res_no_worker["polled"])
+
+            worker = self._make_worker("idle_radar_acc")
+            worker._main_task = asyncio.create_task(asyncio.sleep(10))
+            orch.workers["idle_radar_acc"] = worker
+            try:
+                res_with_worker = await orch.force_radar_refresh()
+                self.assertTrue(res_with_worker["ok"])
+                self.assertTrue(res_with_worker["polled"])
+                self.assertFalse(res_with_worker["found_new"])
+            finally:
+                worker._main_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker._main_task
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

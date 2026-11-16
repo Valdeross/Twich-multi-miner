@@ -3702,10 +3702,17 @@
       document.getElementById("btnPollRadarNow").addEventListener("click", async () => {
         const res = await callApi("poll_radar_now");
         if (res && res.ok) {
-          showToast("Радар обновлён", "ok");
+          showToast(
+            res.found_new ? "Радар обновлён: найдены новые кампании" : "Радар обновлён",
+            "ok"
+          );
           await refreshState();
         } else {
-          showToast("Для опроса радара нужен хотя бы один активный клиент", "warn");
+          await refreshState();
+          showToast(
+            (res && res.error) || "Для опроса радара нужен хотя бы один запущенный авторизованный аккаунт",
+            "warn"
+          );
         }
       });
 
