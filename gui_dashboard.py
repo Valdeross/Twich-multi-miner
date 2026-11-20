@@ -381,6 +381,9 @@ class DesktopBridge:
                                 if acl_ids:
                                     if ch.id in acl_ids:
                                         seen_live_ids.add(ch.id)
+                                elif getattr(ch, "drops_verified", False):
+                                    if camp.id in getattr(ch, "available_campaign_ids", ()):
+                                        seen_live_ids.add(ch.id)
                                 elif ch.drops_enabled and ch.game is not None and ch.game == camp.game:
                                     seen_live_ids.add(ch.id)
                         live_count = len(seen_live_ids)
@@ -826,7 +829,7 @@ class MultiMinerDashboard:
                     mining = sum(
                         1
                         for s in snaps
-                        if s.running and s.watching_channel and not s.is_standby
+                        if s.running and s.watching_channel and s.watching_channel != "—" and not s.is_standby
                     )
                     self.tray.update_tooltip(
                         f"{APP_NAME} · активны {running}/{len(snaps)} · добыча {mining}"

@@ -98,6 +98,7 @@ class AccountProfileConfig:
     user_agent: str = ""
     user_id: int | None = None
     username: str = ""
+    claimed_drop_ids: list[str] = field(default_factory=list)
 
     def ensure_identity(self) -> bool:
         """Populate missing unique fingerprint fields and return True if mutated."""
@@ -141,6 +142,7 @@ class AccountProfileConfig:
             "user_agent": "",
             "user_id": None,
             "username": "",
+            "claimed_drop_ids": [],
         }
         if path.exists():
             raw = json_load(path, defaults, merge=False)
@@ -149,6 +151,11 @@ class AccountProfileConfig:
         raw_proxy = str(raw.get("proxy", "") or "").strip()
         proxy = unprotect_secret(raw_proxy)
         proxy_migrated = bool(raw_proxy) and not is_protected_secret(raw_proxy)
+        claimed_drop_ids = [
+            str(x).strip()
+            for x in (raw.get("claimed_drop_ids") or [])
+            if str(x).strip()
+        ][-500:]
         cfg = cls(
             name=name,
             enabled=bool(raw.get("enabled", True)),
@@ -158,6 +165,7 @@ class AccountProfileConfig:
             user_agent=str(raw.get("user_agent", "") or "").strip(),
             user_id=int(raw["user_id"]) if raw.get("user_id") is not None else None,
             username=str(raw.get("username", "") or "").strip(),
+            claimed_drop_ids=claimed_drop_ids,
         )
         if cfg.ensure_identity() or not path.exists() or proxy_migrated:
             cfg.save(base_dir)
@@ -166,6 +174,7 @@ class AccountProfileConfig:
     def save(self, base_dir: Path = PROFILES_DIR) -> None:
         path = self.config_path(self.name, base_dir)
         data = asdict(self)
+        data["claimed_drop_ids"] = list(data.get("claimed_drop_ids") or [])[-500:]
         if data.get("proxy"):
             data["proxy"] = protect_secret(data["proxy"])
         json_save(path, data, sort=True)

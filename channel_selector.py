@@ -1,6 +1,7 @@
 """Channel prioritization, stream directory lookup, and channel-switching selection logic."""
 from __future__ import annotations
 
+import asyncio
 from collections import abc
 from datetime import datetime, timedelta, timezone
 from time import time
@@ -8,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from channel import Channel, Stream
 from constants import GQL_QUERIES, MAX_CHANNELS, MAX_INT, JsonType, PriorityMode, State, WebsocketTopic
-from exceptions import GQLException
+from exceptions import ExitRequest, GQLException, MinerException
 from utils import Game, chunk, deduplicate
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ class ChannelSelectorMixin:
 
         exclude = set(self.global_settings.exclude_games)  # type: ignore[attr-defined]
         fav_ids = set(self.global_settings.favorite_campaigns)  # type: ignore[attr-defined]
+        preset = getattr(self.global_settings, "radar_preset", "default")  # type: ignore[attr-defined]
         priority = self.effective_priority_games()
         priority_mode = self.global_settings.priority_mode_enum  # type: ignore[attr-defined]
         priority_only = priority_mode is PriorityMode.PRIORITY_ONLY
@@ -62,9 +64,16 @@ class ChannelSelectorMixin:
                 sorted_campaigns.sort(key=lambda c: c.ends_at)
             elif priority_mode is PriorityMode.LOW_AVBL_FIRST:
                 sorted_campaigns.sort(key=lambda c: c.availability)
-        sorted_campaigns.sort(
-            key=lambda c: priority.index(c.game.name) if c.game.name in priority else MAX_INT
-        )
+            sorted_campaigns.sort(key=lambda c: 0 if c.progress > 0 else 1)
+        if preset != "all_campaigns":
+            sorted_campaigns.sort(
+                key=lambda c: priority.index(c.game.name) if c.game.name in priority else MAX_INT
+            )
+        elif self.radar.auto_promoted_games:  # type: ignore[attr-defined]
+            promoted = self.radar.auto_promoted_games  # type: ignore[attr-defined]
+            sorted_campaigns.sort(
+                key=lambda c: promoted.index(c.game.name) if c.game.name in promoted else MAX_INT
+            )
         sorted_campaigns.sort(key=lambda c: 0 if c.id in fav_ids else 1)
         for campaign in sorted_campaigns:
             game = campaign.game
@@ -81,42 +90,81 @@ class ChannelSelectorMixin:
         new_channels: set[Channel] = set(channels.values())
         channels.clear()
 
-        no_acl: set[Game] = set()
-        acl_channels: set[Channel] = set()
+        no_acl_seen: set[Game] = set()
+        ordered_no_acl: list[Game] = []
+        special_camp_games: set[Game] = set()
+        acl_seen: set[Channel] = set()
+        acl_channels_ordered: list[Channel] = []
         next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
         exclusive_id = self._exclusive_campaign_id()
 
+        campaigns_by_game: dict[Game, list[DropsCampaign]] = {}
         for campaign in self.inventory:  # type: ignore[attr-defined]
             if exclusive_id and campaign.id != exclusive_id:
                 continue
             if campaign.game in self.wanted_games and campaign.can_earn_within(next_hour):  # type: ignore[attr-defined]
+                campaigns_by_game.setdefault(campaign.game, []).append(campaign)
+
+        for game in self.wanted_games:  # type: ignore[attr-defined]
+            for campaign in campaigns_by_game.get(game, ()):
                 if campaign.allowed_channels:
-                    acl_channels.update(campaign.allowed_channels)
+                    for ch in campaign.allowed_channels[:50]:
+                        if ch not in acl_seen:
+                            acl_seen.add(ch)
+                            acl_channels_ordered.append(ch)
                 else:
-                    no_acl.add(campaign.game)
+                    for vgame in self.radar.get_verified_campaign_games(campaign.id):  # type: ignore[attr-defined]
+                        if game.is_special():
+                            special_camp_games.add(vgame)
+                        if vgame not in no_acl_seen:
+                            no_acl_seen.add(vgame)
+                            ordered_no_acl.append(vgame)
+                    if game not in no_acl_seen:
+                        no_acl_seen.add(game)
+                        ordered_no_acl.append(game)
 
-        # Inject pinned streamers cached in SharedCampaignRadar (disabled when waiting exclusively for one campaign)
-        if not exclusive_id:
-            for st in self.radar.pinned_streams.values():  # type: ignore[attr-defined]
-                if st.online and st.channel_id and st.raw_channel_data:
-                    ch = Channel(
-                        self,  # type: ignore[arg-type]
-                        id=st.channel_id,
-                        login=st.login,
-                        display_name=st.display_name or st.login,
-                        pinned=True,
-                    )
-                    avail_payload = [{"id": cid} for cid in st.active_campaign_ids]
-                    ch.external_update(st.raw_channel_data, avail_payload)
-                    new_channels.add(ch)
+        # Inject matching pinned streamers cached in SharedCampaignRadar
+        for st in self.radar.pinned_streams.values():  # type: ignore[attr-defined]
+            if not (st.online and st.channel_id and st.raw_channel_data):
+                continue
+            if exclusive_id and exclusive_id not in st.active_campaign_ids:
+                continue
+            ch = Channel(
+                self,  # type: ignore[arg-type]
+                id=st.channel_id,
+                login=st.login,
+                display_name=st.display_name or st.login,
+                pinned=True,
+            )
+            avail_payload = [{"id": cid} for cid in st.active_campaign_ids]
+            ch.external_update(st.raw_channel_data, avail_payload)
+            new_channels.add(ch)
 
-        acl_channels.difference_update(new_channels)
-        await self.bulk_check_online(acl_channels)
-        new_channels.update(acl_channels)
+        acl_to_check = [ch for ch in acl_channels_ordered if ch not in new_channels][:MAX_CHANNELS]
+        await self.bulk_check_online(acl_to_check)
+        new_channels.update(acl_to_check)
 
-        for game in no_acl:
-            for stream_ch in await self.get_live_streams(game, drops_enabled=True):
-                new_channels.add(stream_ch)
+        dir_channels_to_verify: list[Channel] = []
+        for game_batch in chunk(ordered_no_acl, 10):
+            batch_results = await asyncio.gather(
+                *(self.get_live_streams(game, drops_enabled=True) for game in game_batch),  # type: ignore[attr-defined]
+                return_exceptions=True,
+            )
+            for game, streams in zip(game_batch, batch_results):
+                if isinstance(streams, BaseException):
+                    if isinstance(streams, (asyncio.CancelledError, ExitRequest)):
+                        raise streams
+                    continue
+                verify_drops = bool(self.global_settings.available_drops_check) and (  # type: ignore[attr-defined]
+                    game.is_special() or game in special_camp_games or bool(exclusive_id)
+                )
+                for stream_ch in streams:
+                    new_channels.add(stream_ch)
+                    if verify_drops:
+                        dir_channels_to_verify.append(stream_ch)
+
+        if dir_channels_to_verify:
+            await self._verify_directory_channels_drops(dir_channels_to_verify)
 
         ordered = sorted(new_channels, key=lambda c: c.viewers if c.viewers is not None else -1, reverse=True)
         ordered.sort(key=lambda c: c.acl_based, reverse=True)
@@ -224,15 +272,19 @@ class ChannelSelectorMixin:
         if stalled_until > time():
             return False
         exclusive_id = self._exclusive_campaign_id()
+        drops_verified = bool(getattr(channel, "drops_verified", False))
         avail_ids = set(getattr(channel, "available_campaign_ids", ()) or ())
         for campaign in self.inventory:  # type: ignore[attr-defined]
             if exclusive_id and campaign.id != exclusive_id:
                 continue
-            if avail_ids and campaign.id not in avail_ids:
+            if drops_verified:
+                if campaign.id not in avail_ids:
+                    continue
+            elif avail_ids and campaign.id not in avail_ids:
                 continue
             if campaign.can_earn(channel) and (
                 (channel.game is not None and channel.drops_enabled and channel.game in self.wanted_games)  # type: ignore[attr-defined]
-                or campaign.game.is_special()
+                or (campaign.game.is_special() and channel.drops_enabled)
                 or (channel.acl_based and channel in campaign.allowed_channels)
                 or (channel.id in campaign.verified_channel_ids)
             ):
@@ -263,15 +315,43 @@ class ChannelSelectorMixin:
         if watching is None:
             return None
         exclusive_id = self._exclusive_campaign_id()
+        drops_verified = bool(getattr(watching, "drops_verified", False))
+        avail_ids = set(getattr(watching, "available_campaign_ids", ()) or ())
         campaigns = [
             c
             for c in self.inventory  # type: ignore[attr-defined]
-            if c.can_earn(watching) and (not exclusive_id or c.id == exclusive_id)
+            if c.can_earn(watching)
+            and (not exclusive_id or c.id == exclusive_id)
+            and ((c.id in avail_ids) if drops_verified else (not avail_ids or c.id in avail_ids))
         ]
         if not campaigns:
             return None
         campaigns.sort(key=lambda c: c.remaining_minutes)
         return campaigns[0]
+
+    async def _verify_directory_channels_drops(self, channels: list[Channel]) -> None:
+        """Verify AvailableDrops campaign IDs on directory channels (e.g. Special Events / exclusive mode)."""
+        unique: list[Channel] = []
+        seen_ids: set[int] = set()
+        for ch in channels:
+            if ch.id in seen_ids or getattr(ch, "drops_verified", False):
+                continue
+            seen_ids.add(ch.id)
+            unique.append(ch)
+        for ch_chunk in chunk(unique, 20):
+            ops = [GQL_QUERIES["AvailableDrops"].with_variables({"channelID": str(ch.id)}) for ch in ch_chunk]
+            try:
+                resps = await self.gql_request(ops)  # type: ignore[attr-defined]
+            except MinerException:
+                continue
+            for ch, resp in zip(ch_chunk, resps):
+                avail = (
+                    ((resp.get("data") or {}).get("channel") or {}).get("viewerDropCampaigns")
+                    or []
+                )
+                has_available = ch._check_drops_enabled(avail)
+                if ch._stream is not None:
+                    ch._stream.drops_enabled = has_available
 
     async def get_live_streams(
         self, game: Game, *, limit: int = 20, drops_enabled: bool = True
@@ -336,7 +416,11 @@ class ChannelSelectorMixin:
             ch.external_update(cdata, avail)
             if avail:
                 await self.radar.ingest_channel_campaigns(  # type: ignore[attr-defined]
-                    self, avail, channel_id=ch.id, channel_login=ch.login
+                    self,
+                    avail,
+                    channel_id=ch.id,
+                    channel_login=ch.login,
+                    channel_game=(cdata.get("broadcastSettings") or {}).get("game"),
                 )
 
     def on_channel_update(

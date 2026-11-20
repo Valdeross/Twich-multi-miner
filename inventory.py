@@ -188,10 +188,14 @@ class BaseDrop:
         if status == "CLAIMED_NEW":
             self.is_claimed = True
             self._worker.record_claimed_drop(self)
+            if hasattr(self._worker, "remember_claimed_drop_id"):
+                self._worker.remember_claimed_drop_id(self.id)
             return True
         if status == "ALREADY_CLAIMED":
             self.is_claimed = True
-            if hasattr(self._worker, "_claimed_drop_ids"):
+            if hasattr(self._worker, "remember_claimed_drop_id"):
+                self._worker.remember_claimed_drop_id(self.id)
+            elif hasattr(self._worker, "_claimed_drop_ids"):
                 self._worker._claimed_drop_ids.add(self.id)
             return True
         logger.error(f"[{self._worker.name}] Drop claim failed! Drop ID: {self.id}")
@@ -237,6 +241,12 @@ class TimedDrop(BaseDrop):
             else 0
         )
         self.required_minutes: int = int(data.get("requiredMinutesWatched") or 0)
+        self.required_subs: int = int(data.get("requiredSubs") or 0)
+        self.current_subs: int = (
+            int(self_edge.get("currentSubs") or 0)
+            if isinstance(self_edge, dict)
+            else 0
+        )
         self.extra_current_minutes: int = 0
         self.unconfirmed_minutes: int = 0
         if self.is_claimed:
@@ -313,7 +323,11 @@ class TimedDrop(BaseDrop):
 
     def _base_earn_conditions(self) -> bool:
         # Never block earning due to extra_current_minutes / delayed WebSocket updates
-        return super()._base_earn_conditions() and self.required_minutes > 0
+        return (
+            super()._base_earn_conditions()
+            and self.required_minutes > 0
+            and (self.required_subs <= 0 or self.current_subs >= self.required_subs)
+        )
 
     def _on_state_changed(self) -> None:
         self._worker.notify_ui_update()
@@ -437,7 +451,7 @@ class DropsCampaign:
     def eligible(self) -> bool:
         if self.has_badge_or_emote:
             return self._worker.global_settings.enable_badges_emotes
-        return self.linked
+        return True
 
     @cached_property
     def has_badge_or_emote(self) -> bool:
@@ -447,7 +461,12 @@ class DropsCampaign:
 
     @property
     def finished(self) -> bool:
-        return all(d.is_claimed or d.required_minutes <= 0 for d in self.drops)
+        return all(
+            d.is_claimed
+            or d.required_minutes <= 0
+            or (d.required_subs > 0 and d.current_subs < d.required_subs)
+            for d in self.drops
+        )
 
     @property
     def claimed_drops(self) -> int:

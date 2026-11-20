@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 APP_NAME = "TwitchMultiMiner"
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 
 WORKING_DIR = Path(__file__).resolve().parent
 PROFILES_DIR = WORKING_DIR / "profiles"

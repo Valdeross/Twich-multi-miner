@@ -9,9 +9,10 @@ import re
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from time import time
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 try:
     import winreg
@@ -21,9 +22,9 @@ except ImportError:  # pragma: no cover - non-Windows fallback
 import aiohttp
 
 from auth_transport import EgressLimiterRegistry
-from constants import GQL_QUERIES, JsonType, URLType
+from constants import DEFAULT_PRIORITY_GAMES, GQL_QUERIES, WORKING_DIR, JsonType, URLType
 from exceptions import MinerException, RequestException
-from utils import chunk, deduplicate, is_socks_proxy, make_connector
+from utils import Game, chunk, deduplicate, is_socks_proxy, make_connector, timestamp
 
 if TYPE_CHECKING:
     from settings import GlobalSettings
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("TwitchMultiMiner.radar")
+RADAR_CACHE_PATH = WORKING_DIR / "cache" / "radar_catalog.json"
+_UNSET = object()
 
 _STEAM_NON_GAME_APPIDS = {"228980", "431960", "629520", "1905180", "365670"}
 _NON_GAME_PATTERNS = (
@@ -329,17 +332,27 @@ class PinnedStreamerStatus:
 class SharedCampaignRadar:
     """Centralizes catalog fetches, streamer AvailableDrops checks, and Spade URLs across workers."""
 
-    def __init__(self, global_settings: GlobalSettings) -> None:
+    def __init__(
+        self,
+        global_settings: GlobalSettings,
+        *,
+        cache_path: Path | None | object = _UNSET,
+    ) -> None:
         self.global_settings: GlobalSettings = global_settings
         self._catalog_lock = asyncio.Lock()
         self._radar_lock = asyncio.Lock()
         self._details_lock = asyncio.Lock()
+        self._cache_path: Path | None = (
+            RADAR_CACHE_PATH if cache_path is _UNSET else cache_path  # type: ignore[assignment]
+        )
 
         self._catalog_campaigns: dict[str, JsonType] = {}
         self._catalog_fetched_at: float = 0.0
+        self._catalog_backoff_until: float = 0.0
 
         self._direct_campaigns: dict[str, JsonType] = {}
         self.verified_channels: dict[str, set[int]] = {}
+        self.verified_campaign_games: dict[str, dict[str, JsonType]] = {}
         self.pinned_streams: dict[str, PinnedStreamerStatus] = {
             login: PinnedStreamerStatus(login=login)
             for login in global_settings.pinned_streamers
@@ -351,6 +364,109 @@ class SharedCampaignRadar:
         self._pc_games_cache: list[str] = []
         self._pc_games_scanned_at: float = 0.0
         self.egress_limiters = EgressLimiterRegistry(capacity=5, window=1)
+        self._load_disk_cache()
+
+    @staticmethod
+    def _is_campaign_unexpired(campaign: JsonType, now_utc: datetime) -> bool:
+        if campaign.get("status") == "EXPIRED":
+            return False
+        end_at_raw = campaign.get("endAt")
+        if isinstance(end_at_raw, str) and end_at_raw.strip():
+            with suppress(ValueError, TypeError):
+                return timestamp(end_at_raw) > now_utc
+        return True
+
+    def _load_disk_cache(self) -> None:
+        if self._cache_path is None or not self._cache_path.is_file():
+            return
+        try:
+            payload = json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        now_utc = datetime.now(timezone.utc)
+        now_ts = time()
+        fetched_at = float(payload.get("catalog_fetched_at") or 0.0)
+        backoff_until = float(payload.get("catalog_backoff_until") or 0.0)
+        if fetched_at <= now_ts + 60.0:
+            self._catalog_fetched_at = max(0.0, fetched_at)
+        if backoff_until > now_ts and backoff_until <= now_ts + 3600.0:
+            self._catalog_backoff_until = backoff_until
+
+        for attr_name, key in (
+            ("_catalog_campaigns", "catalog_campaigns"),
+            ("_direct_campaigns", "direct_campaigns"),
+        ):
+            raw_map = payload.get(key)
+            if not isinstance(raw_map, dict):
+                continue
+            target: dict[str, JsonType] = getattr(self, attr_name)
+            for cid, raw_camp in raw_map.items():
+                if not isinstance(cid, str) or not isinstance(raw_camp, dict):
+                    continue
+                if not self._is_campaign_unexpired(raw_camp, now_utc):
+                    continue
+                norm = self._normalize_campaign_dict(raw_camp)
+                if norm is not None:
+                    target[cid] = norm
+
+        active_cids = set(self._catalog_campaigns.keys()) | set(self._direct_campaigns.keys())
+        raw_vc = payload.get("verified_channels")
+        if isinstance(raw_vc, dict):
+            for cid, ch_ids in raw_vc.items():
+                if cid in active_cids and isinstance(ch_ids, list):
+                    self.verified_channels[cid] = {int(x) for x in ch_ids if x is not None}
+
+        raw_vg = payload.get("verified_campaign_games")
+        if isinstance(raw_vg, dict):
+            for cid, g_map in raw_vg.items():
+                if cid in active_cids and isinstance(g_map, dict):
+                    clean_games: dict[str, JsonType] = {}
+                    for gid, gobj in g_map.items():
+                        if isinstance(gobj, dict) and gobj.get("id") and (gobj.get("displayName") or gobj.get("name")):
+                            clean_games[str(gid)] = dict(gobj)
+                    if clean_games:
+                        self.verified_campaign_games[cid] = clean_games
+
+    def _save_disk_cache(self) -> None:
+        if self._cache_path is None:
+            return
+        now_utc = datetime.now(timezone.utc)
+        catalog_clean = {
+            cid: c
+            for cid, c in self._catalog_campaigns.items()
+            if self._is_campaign_unexpired(c, now_utc)
+        }
+        direct_clean = {
+            cid: c
+            for cid, c in self._direct_campaigns.items()
+            if self._is_campaign_unexpired(c, now_utc)
+        }
+        active_cids = set(catalog_clean.keys()) | set(direct_clean.keys())
+        verified_channels_clean = {
+            cid: sorted(ch_ids)
+            for cid, ch_ids in self.verified_channels.items()
+            if cid in active_cids and ch_ids
+        }
+        verified_games_clean = {
+            cid: g_map
+            for cid, g_map in self.verified_campaign_games.items()
+            if cid in active_cids and g_map
+        }
+        payload = {
+            "catalog_fetched_at": self._catalog_fetched_at,
+            "catalog_backoff_until": self._catalog_backoff_until,
+            "catalog_campaigns": catalog_clean,
+            "direct_campaigns": direct_clean,
+            "verified_channels": verified_channels_clean,
+            "verified_campaign_games": verified_games_clean,
+        }
+        with suppress(OSError, ValueError, TypeError):
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._cache_path.with_name(f"{self._cache_path.name}.tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp_path.replace(self._cache_path)
 
     def sync_pinned_list(self) -> None:
         desired = {s.strip().lower() for s in self.global_settings.pinned_streamers if s.strip()}
@@ -411,12 +527,19 @@ class SharedCampaignRadar:
     async def get_catalog_campaigns(
         self, *, proxy_url: str = "", force: bool = False
     ) -> dict[str, JsonType]:
-        ttl = max(30, self.global_settings.radar_interval_sec)
-        if not force and self._catalog_campaigns and (time() - self._catalog_fetched_at) < ttl:
+        ttl = max(310, self.global_settings.radar_interval_sec)
+        min_interval = 305.0 if force else float(ttl)
+        now = time()
+        if now < self._catalog_backoff_until:
+            return deepcopy(self._catalog_campaigns)
+        if self._catalog_campaigns and (now - self._catalog_fetched_at) < min_interval:
             return deepcopy(self._catalog_campaigns)
 
         async with self._catalog_lock:
-            if not force and self._catalog_campaigns and (time() - self._catalog_fetched_at) < ttl:
+            now = time()
+            if now < self._catalog_backoff_until:
+                return deepcopy(self._catalog_campaigns)
+            if self._catalog_campaigns and (now - self._catalog_fetched_at) < min_interval:
                 return deepcopy(self._catalog_campaigns)
 
             catalog_url = "https://twitch-drops-api.sunkwi.com/v2/drops"
@@ -433,8 +556,20 @@ class SharedCampaignRadar:
                 ) as session:
                     async with session.get(catalog_url, **req_kwargs) as response:
                         if response.status == 429:
-                            self._catalog_fetched_at = time() + 600.0
-                            raise RequestException("HTTP 429 (backing off 10m)")
+                            retry_raw = (
+                                response.headers.get("Retry-After")
+                                or response.headers.get("ratelimit-reset")
+                                or "310"
+                            )
+                            try:
+                                retry_sec = float(retry_raw)
+                            except ValueError:
+                                retry_sec = 310.0
+                            backoff_sec = max(60.0, retry_sec)
+                            self._catalog_backoff_until = time() + backoff_sec
+                            self._catalog_fetched_at = time()
+                            self._save_disk_cache()
+                            raise RequestException(f"HTTP 429 (backing off {round(backoff_sec)}s)")
                         if response.status != 200:
                             raise RequestException(f"HTTP {response.status}")
                         payload: JsonType = await response.json()
@@ -463,7 +598,33 @@ class SharedCampaignRadar:
 
             self._catalog_campaigns = parsed
             self._catalog_fetched_at = time()
+            self._catalog_backoff_until = 0.0
+            self._save_disk_cache()
             return deepcopy(self._catalog_campaigns)
+
+    def get_verified_campaign_games(self, campaign_id: str) -> list[Game]:
+        """Return observed stream categories where a campaign's drops were seen live."""
+        g_map = self.verified_campaign_games.get(campaign_id)
+        if not g_map:
+            return []
+        return [
+            Game(g)
+            for g in g_map.values()
+            if isinstance(g, dict) and g.get("id") and (g.get("displayName") or g.get("name"))
+        ]
+
+    @staticmethod
+    def _normalize_observed_game(channel_game: JsonType | None) -> JsonType | None:
+        if not isinstance(channel_game, dict):
+            return None
+        gid = str(channel_game.get("id") or "").strip()
+        gname = str(channel_game.get("displayName") or channel_game.get("name") or "").strip()
+        if not gid or gid == "0" or not gname:
+            return None
+        norm: JsonType = {"id": gid, "name": gname}
+        if channel_game.get("slug"):
+            norm["slug"] = str(channel_game["slug"])
+        return norm
 
     async def ingest_channel_campaigns(
         self,
@@ -472,11 +633,14 @@ class SharedCampaignRadar:
         *,
         channel_id: int,
         channel_login: str,
+        channel_game: JsonType | None = None,
     ) -> list[str]:
-        """Register campaigns reported by Twitch AvailableDrops directly via CampaignDetails."""
+        """Register campaigns reported by Twitch AvailableDrops directly (fetching details only if drops are missing)."""
         newly_discovered: list[str] = []
         missing_ids: list[str] = []
         avail_map: dict[str, JsonType] = {}
+        norm_game = self._normalize_observed_game(channel_game)
+        cache_dirty = False
 
         for item in raw_avail:
             if not isinstance(item, dict):
@@ -485,41 +649,19 @@ class SharedCampaignRadar:
             if not isinstance(cid, str) or not cid:
                 continue
             avail_map[cid] = item
-            self.verified_channels.setdefault(cid, set()).add(channel_id)
+            ch_set = self.verified_channels.setdefault(cid, set())
+            if channel_id not in ch_set:
+                ch_set.add(channel_id)
+                cache_dirty = True
+            if norm_game is not None:
+                g_map = self.verified_campaign_games.setdefault(cid, {})
+                if g_map.get(norm_game["id"]) != norm_game:
+                    g_map[norm_game["id"]] = dict(norm_game)
+                    cache_dirty = True
             if cid not in self._direct_campaigns:
-                missing_ids.append(cid)
-
-        if not missing_ids:
-            return newly_discovered
-
-        async with self._details_lock:
-            to_fetch = [cid for cid in missing_ids if cid not in self._direct_campaigns]
-            if not to_fetch:
-                return newly_discovered
-            uid = worker.user_id
-            if uid is None:
-                return newly_discovered
-            for cid_chunk in chunk(to_fetch, 20):
-                try:
-                    ops = [
-                        GQL_QUERIES["CampaignDetails"].with_variables(
-                            {"channelLogin": str(uid), "dropID": cid}
-                        )
-                        for cid in cid_chunk
-                    ]
-                    responses: list[JsonType] = await worker.gql_request(ops)
-                except MinerException as exc:
-                    logger.debug(f"[RADAR] CampaignDetails direct fetch error: {exc}")
-                    continue
-                for cid, resp in zip(cid_chunk, responses):
-                    raw_camp = (
-                        (resp.get("data") or {}).get("user", {}) or {}
-                    ).get("dropCampaign")
-                    if not isinstance(raw_camp, dict):
-                        raw_camp = avail_map.get(cid)
-                    if not isinstance(raw_camp, dict):
-                        continue
-                    norm = self._normalize_campaign_dict(raw_camp)
+                drops_list = item.get("timeBasedDrops")
+                if isinstance(drops_list, list) and drops_list:
+                    norm = self._normalize_campaign_dict(item)
                     if norm is not None:
                         self._direct_campaigns[cid] = norm
                         newly_discovered.append(cid)
@@ -527,7 +669,112 @@ class SharedCampaignRadar:
                             f"[RADAR] Direct Twitch discovery on {channel_login}: "
                             f"{norm.get('name')} ({(norm.get('game') or {}).get('name')})"
                         )
+                else:
+                    missing_ids.append(cid)
+
+        if missing_ids:
+            async with self._details_lock:
+                to_fetch = [cid for cid in missing_ids if cid not in self._direct_campaigns]
+                uid = worker.user_id
+                if to_fetch and uid is not None:
+                    for cid_chunk in chunk(to_fetch, 20):
+                        try:
+                            ops = [
+                                GQL_QUERIES["CampaignDetails"].with_variables(
+                                    {"channelLogin": str(uid), "dropID": cid}
+                                )
+                                for cid in cid_chunk
+                            ]
+                            responses: list[JsonType] = await worker.gql_request(ops)
+                        except MinerException as exc:
+                            logger.debug(f"[RADAR] CampaignDetails direct fetch error: {exc}")
+                            responses = []
+                        for idx, cid in enumerate(cid_chunk):
+                            resp = responses[idx] if idx < len(responses) else {}
+                            raw_camp = (
+                                (resp.get("data") or {}).get("user", {}) or {}
+                            ).get("dropCampaign")
+                            if not isinstance(raw_camp, dict):
+                                raw_camp = avail_map.get(cid)
+                            if not isinstance(raw_camp, dict):
+                                continue
+                            norm = self._normalize_campaign_dict(raw_camp)
+                            if norm is not None:
+                                self._direct_campaigns[cid] = norm
+                                newly_discovered.append(cid)
+                                logger.info(
+                                    f"[RADAR] Direct Twitch discovery on {channel_login}: "
+                                    f"{norm.get('name')} ({(norm.get('game') or {}).get('name')})"
+                                )
+        if newly_discovered or cache_dirty:
+            self._save_disk_cache()
         return newly_discovered
+
+    async def discover_from_game_directories(self, worker: AccountWorker) -> bool:
+        """Fallback direct Twitch GQL campaign discovery across top priority games when public catalog is unavailable."""
+        exclude = {g.casefold() for g in self.global_settings.exclude_games}
+        source_games = (
+            list(self.global_settings.priority_games)
+            if getattr(self.global_settings, "radar_preset", "default") != "pc_games"
+            else []
+        )
+        candidates = [
+            g for g in deduplicate([*source_games, *DEFAULT_PRIORITY_GAMES])
+            if g and g.casefold() not in exclude
+        ][:10]
+        if not candidates:
+            return False
+
+        stream_batches = await asyncio.gather(
+            *(
+                worker.get_live_streams(Game({"id": "0", "name": g_name}), limit=3, drops_enabled=True)
+                for g_name in candidates
+            ),
+            return_exceptions=True,
+        )
+        targets: dict[int, tuple[str, JsonType | None]] = {}
+        for batch in stream_batches:
+            if isinstance(batch, BaseException):
+                continue
+            for ch in batch:
+                if ch.id not in targets:
+                    ch_game: JsonType | None = (
+                        {"id": str(ch.game.id), "name": ch.game.name}
+                        if ch.game is not None
+                        else None
+                    )
+                    targets[ch.id] = (ch.login, ch_game)
+
+        if not targets:
+            return False
+
+        discovered = False
+        target_items = list(targets.items())
+        for t_chunk in chunk(target_items, 20):
+            try:
+                ops = [
+                    GQL_QUERIES["AvailableDrops"].with_variables({"channelID": str(cid)})
+                    for cid, _ in t_chunk
+                ]
+                resps = await worker.gql_request(ops)
+            except MinerException:
+                continue
+            for (cid, (login, ch_game)), resp in zip(t_chunk, resps):
+                avail_list = (
+                    (resp.get("data") or {}).get("channel", {}).get("viewerDropCampaigns")
+                    or []
+                )
+                if avail_list:
+                    added = await self.ingest_channel_campaigns(
+                        worker,
+                        avail_list,
+                        channel_id=cid,
+                        channel_login=login,
+                        channel_game=ch_game,
+                    )
+                    if added:
+                        discovered = True
+        return discovered
 
     async def poll_pinned_streamers(self, worker: AccountWorker, *, force: bool = False) -> bool:
         """Query Twitch GQL directly for live status and AvailableDrops on pinned streamers."""
@@ -615,8 +862,17 @@ class SharedCampaignRadar:
                                 if isinstance(c, dict) and c.get("id")
                             ]
                             if avail_list:
+                                st_game = (
+                                    (status.raw_channel_data.get("broadcastSettings") or {}).get("game")
+                                    if isinstance(status.raw_channel_data, dict)
+                                    else None
+                                )
                                 added = await self.ingest_channel_campaigns(
-                                    worker, avail_list, channel_id=ch_id, channel_login=login
+                                    worker,
+                                    avail_list,
+                                    channel_id=ch_id,
+                                    channel_login=login,
+                                    channel_game=st_game,
                                 )
                                 if added:
                                     discovered_new = True

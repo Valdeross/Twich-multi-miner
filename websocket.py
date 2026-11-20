@@ -138,6 +138,8 @@ class Websocket:
         ):
             self._ws.set(websocket)
             self._reconnect_requested.clear()
+            self._next_ping = time()
+            self._max_pong = self._next_ping + PING_TIMEOUT.total_seconds()
             self.set_status("connected")
             ws_logger.info(f"[{self._worker.name}] WS[{self._idx}] connected.")
             try:

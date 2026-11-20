@@ -103,13 +103,20 @@ def _make_campaign_payload(
 
 class TestTwitchMultiMiner(unittest.TestCase):
     def setUp(self) -> None:
+        import radar as radar_mod
+
         self.tmpdir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmpdir.name)
         self.profiles_dir = self.tmp_path / "profiles"
+        self._orig_radar_cache = radar_mod.RADAR_CACHE_PATH
+        radar_mod.RADAR_CACHE_PATH = self.tmp_path / "radar_catalog.json"
         self.gs = GlobalSettings()
         self.radar = SharedCampaignRadar(self.gs)
 
     def tearDown(self) -> None:
+        import radar as radar_mod
+
+        radar_mod.RADAR_CACHE_PATH = self._orig_radar_cache
         self.tmpdir.cleanup()
 
     def _make_worker(self, name: str, uid: int = 12345) -> AccountWorker:
@@ -169,8 +176,15 @@ class TestTwitchMultiMiner(unittest.TestCase):
             ok = await ch.send_watch()
             self.assertTrue(ok)
             head_calls = [c for c in calls if c[0] == "HEAD"]
-            self.assertEqual(len(head_calls), 1, "Only the last HLS chunk should receive HEAD")
-            self.assertEqual(head_calls[0][1], "https://cdn.example.com/chunk3.ts")
+            self.assertEqual(len(head_calls), 3, "Every HLS chunk in playlist must receive HEAD")
+            self.assertEqual(
+                [c[1] for c in head_calls],
+                [
+                    "https://cdn.example.com/chunk1.ts",
+                    "https://cdn.example.com/chunk2.ts",
+                    "https://cdn.example.com/chunk3.ts",
+                ],
+            )
 
             # Now simulate expired playlist returning 403 -> _stream_url must reset to None
             worker.request = lambda method, url, **_kw: _DummyResponse(403, "")  # type: ignore[method-assign]
@@ -824,6 +838,9 @@ class TestTwitchMultiMiner(unittest.TestCase):
 
             jar_reloaded = aiohttp.CookieJar()
             self.assertEqual(load_auth_token_from_jar(jar_reloaded, cookies_path, url), raw)
+            # Plaintext auth-token must remain in memory for live HTTP requests (not dpapi:... ciphertext)
+            self.assertEqual(jar.filter_cookies(url)["auth-token"].value, raw)
+            self.assertEqual(jar_reloaded.filter_cookies(url)["auth-token"].value, raw)
 
             # Verify legacy plaintext cookies.jar auto-migrates to protected form
             legacy_path = self.tmp_path / "legacy_cookies.jar"
@@ -1308,6 +1325,8 @@ class TestTwitchMultiMiner(unittest.TestCase):
             )
             camp = DropsCampaign(worker, payload, {})
             worker.inventory = [camp]
+            worker._campaigns = {camp.id: camp}
+            worker._drops = {d.id: d for d in camp.drops}
             worker.wanted_games = [camp.game]
             ch = Channel(worker, id=321, login="sync_ch", display_name="SyncCh")
             ch._stream = Stream(
@@ -1325,19 +1344,37 @@ class TestTwitchMultiMiner(unittest.TestCase):
                 return {"data": {"currentUser": {"dropCurrentSession": None}}}
 
             worker.gql_request = fake_current_drop_none  # type: ignore[method-assign]
-            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            await worker._sync_active_drop_progress(ch, watch_ok=False)
             drop0 = list(camp.drops)[0]
             self.assertEqual(drop0.extra_current_minutes, 0)
+
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            self.assertEqual(drop0.extra_current_minutes, 1)
 
             async def fake_current_drop_err(op):
                 raise GQLException("temp error")
 
             worker.gql_request = fake_current_drop_err  # type: ignore[method-assign]
             await worker._sync_active_drop_progress(ch, watch_ok=False)
-            self.assertEqual(drop0.extra_current_minutes, 0)
+            self.assertEqual(drop0.extra_current_minutes, 1)
 
             await worker._sync_active_drop_progress(ch, watch_ok=True)
-            self.assertEqual(drop0.extra_current_minutes, 1)
+            self.assertEqual(drop0.extra_current_minutes, 2)
+
+            async def fake_current_drop_lagging(op):
+                return {"data": {"currentUser": {"dropCurrentSession": {"dropID": drop0.id, "currentMinutesWatched": 0}}}}
+
+            worker.gql_request = fake_current_drop_lagging  # type: ignore[method-assign]
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            self.assertEqual(drop0.extra_current_minutes, 3)
+
+            async def fake_current_drop_real(op):
+                return {"data": {"currentUser": {"dropCurrentSession": {"dropID": drop0.id, "currentMinutesWatched": 3}}}}
+
+            worker.gql_request = fake_current_drop_real  # type: ignore[method-assign]
+            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            self.assertEqual(drop0.real_current_minutes, 3)
+            self.assertEqual(drop0.extra_current_minutes, 0)
 
         asyncio.run(run())
 
@@ -1411,15 +1448,535 @@ class TestTwitchMultiMiner(unittest.TestCase):
             async def fake_empty_session(op):
                 return {"data": {"currentUser": {"dropCurrentSession": {"dropID": "", "currentMinutesWatched": 0}}}}
 
+            async def fake_fetch_inv(*, lightweight: bool = False):
+                return None
+
             worker.gql_request = fake_empty_session  # type: ignore[method-assign]
-            await worker._sync_active_drop_progress(ch, watch_ok=True)
-            await worker._sync_active_drop_progress(ch, watch_ok=True)
+            worker.fetch_inventory = fake_fetch_inv  # type: ignore[method-assign]
+            for _ in range(4):
+                await worker._sync_active_drop_progress(ch, watch_ok=True)
             self.assertTrue(worker.can_watch(ch))
+            self.assertEqual(list(camp.drops)[0].extra_current_minutes, 4)
 
             await worker._sync_active_drop_progress(ch, watch_ok=True)
             self.assertIsNone(worker.watching_channel.get_with_default(None))
             self.assertEqual(worker._state, State.CHANNEL_SWITCH)
             self.assertFalse(worker.can_watch(ch))
+            self.assertEqual(list(camp.drops)[0].extra_current_minutes, 0)
+
+        asyncio.run(run())
+
+    def test_unlinked_in_progress_campaign_stays_eligible_and_sub_only_ignored(self) -> None:
+        worker = self._make_worker("unlinked_acc")
+        payload = _make_campaign_payload(
+            cid="camp_dst",
+            name="Butterfly Wardrobe",
+            game_id="490377",
+            game_name="Don't Starve Together",
+            required_minutes=30,
+        )
+        # Twitch returns isAccountConnected=False in dropCampaignsInProgress for unlinked accounts
+        payload["self"] = {"isAccountConnected": False}
+        payload["timeBasedDrops"][0]["self"] = {
+            "dropInstanceID": None,
+            "isClaimed": False,
+            "currentMinutesWatched": 29,
+        }
+        # Add a sub-only drop that should not be treated as watch-earnable or block finished
+        sub_drop = dict(payload["timeBasedDrops"][0])
+        sub_drop["id"] = "drop_sub_only"
+        sub_drop["name"] = "Sub Only Bonus"
+        sub_drop["requiredMinutesWatched"] = 15
+        sub_drop["requiredSubs"] = 1
+        sub_drop["self"] = {"dropInstanceID": None, "isClaimed": False, "currentMinutesWatched": 0, "currentSubs": 0}
+        payload["timeBasedDrops"].append(sub_drop)
+
+        camp = DropsCampaign(worker, payload, {})
+        self.assertFalse(camp.linked)
+        self.assertTrue(camp.eligible, "Unlinked campaign must remain eligible so progress does not stall")
+        self.assertFalse(camp.finished)
+        self.assertTrue(camp.timed_drops["drop_1"].can_earn())
+        self.assertFalse(camp.timed_drops["drop_sub_only"].can_earn())
+
+        # Pure sub-only campaign must report finished=True (not watchable)
+        sub_only_payload = _make_campaign_payload(
+            cid="camp_sub_only",
+            name="Sub Drops",
+            game_id="1234",
+            game_name="SubGame",
+            required_minutes=15,
+        )
+        sub_only_payload["timeBasedDrops"][0]["requiredSubs"] = 2
+        sub_only_payload["timeBasedDrops"][0]["self"]["currentSubs"] = 0
+        camp_sub = DropsCampaign(worker, sub_only_payload, {})
+        self.assertTrue(camp_sub.finished)
+        self.assertFalse(camp_sub.can_earn())
+
+    def test_persistent_claimed_drop_ids_across_restarts(self) -> None:
+        async def run() -> None:
+            worker1 = self._make_worker("persist_claim_acc", uid=538259701)
+            payload = _make_campaign_payload(
+                cid="camp_fp_persist",
+                name="Farlands Drops Event",
+                game_id="1023750977",
+                game_name="FragPunk",
+                required_minutes=30,
+            )
+            payload["timeBasedDrops"][0]["id"] = "drop_molotov_persist"
+            payload["timeBasedDrops"][0]["self"] = {
+                "dropInstanceID": "538259701#camp_fp_persist#drop_molotov_persist",
+                "isClaimed": False,
+                "currentMinutesWatched": 30,
+            }
+            worker1.gql_request = AsyncMock(
+                return_value={"data": {"claimDropRewards": {"status": "ELIGIBLE_FOR_ALL"}}}
+            )  # type: ignore[method-assign]
+            camp1 = DropsCampaign(worker1, payload, {})
+            d1 = camp1.timed_drops["drop_molotov_persist"]
+            self.assertTrue(await d1.claim())
+
+            # Reload profile from disk as a fresh worker (simulating app restart)
+            cfg_reloaded = AccountProfileConfig.load("persist_claim_acc", self.profiles_dir)
+            self.assertIn("drop_molotov_persist", cfg_reloaded.claimed_drop_ids)
+            worker2 = AccountWorker(cfg_reloaded, self.gs, self.radar, profiles_dir=self.profiles_dir)
+            camp2 = DropsCampaign(worker2, payload, {})
+            d2 = camp2.timed_drops["drop_molotov_persist"]
+            self.assertTrue(d2.is_claimed, "Persisted claimed_drop_ids must prevent re-claiming after restart")
+
+        asyncio.run(run())
+
+    def test_radar_disk_cache_429_backoff_and_direct_ingest_skips_campaign_details(self) -> None:
+        import json as json_mod
+
+        async def run() -> None:
+            cache_file = self.tmp_path / "radar_test_cache.json"
+            radar1 = SharedCampaignRadar(self.gs, cache_path=cache_file)
+            worker = self._make_worker("radar_cache_acc")
+            worker.gql_request = AsyncMock(side_effect=AssertionError("CampaignDetails must not be called"))  # type: ignore[method-assign]
+
+            now = datetime.now(timezone.utc)
+            avail_item = _make_campaign_payload(
+                cid="camp_direct_1",
+                name="Direct AvailableDrops Campaign",
+                game_id="516575",
+                game_name="VALORANT",
+                required_minutes=30,
+            )
+            added = await radar1.ingest_channel_campaigns(
+                worker, [avail_item], channel_id=101, channel_login="test_streamer"
+            )
+            self.assertEqual(added, ["camp_direct_1"])
+            self.assertTrue(cache_file.is_file())
+
+            # Simulate HTTP 429 on empty catalog and confirm backoff prevents repeated requests
+            class _Fake429Resp:
+                status = 429
+                headers = {"Retry-After": "300"}
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+            class _FakeSession:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                def get(self, *_args, **_kwargs):
+                    get_calls.append(1)
+                    return _Fake429Resp()
+
+            get_calls: list[int] = []
+            with patch("radar.aiohttp.ClientSession", _FakeSession):
+                await radar1.get_catalog_campaigns(force=True)
+                await radar1.get_catalog_campaigns(force=True)
+            self.assertEqual(len(get_calls), 1, "429 backoff must block subsequent calls even on empty catalog")
+
+            # Add an active catalog campaign + expired one to cache and verify disk reload prunes expired
+            expired_item = _make_campaign_payload(
+                cid="camp_expired_cached",
+                name="Old Event",
+                game_id="1",
+                game_name="OldGame",
+            )
+            expired_item["endAt"] = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            radar1._catalog_campaigns["camp_cat_1"] = _make_campaign_payload(
+                cid="camp_cat_1",
+                name="Active Cached Event",
+                game_id="2",
+                game_name="Rust",
+            )
+            radar1._catalog_campaigns["camp_expired_cached"] = expired_item
+            radar1._save_disk_cache()
+
+            radar2 = SharedCampaignRadar(self.gs, cache_path=cache_file)
+            self.assertIn("camp_direct_1", radar2._direct_campaigns)
+            self.assertIn("camp_cat_1", radar2._catalog_campaigns)
+            self.assertNotIn("camp_expired_cached", radar2._catalog_campaigns)
+            self.assertGreater(radar2._catalog_backoff_until, 0.0)
+
+        asyncio.run(run())
+
+    def test_snapshot_empty_watching_active_campaign_and_ws_pong_reset(self) -> None:
+        from time import time as now_ts
+        from constants import PING_TIMEOUT
+        from websocket import Websocket, WebsocketPool
+
+        async def run() -> None:
+            worker = self._make_worker("snap_acc")
+            snap_idle = worker.snapshot()
+            self.assertEqual(snap_idle.watching_channel, "")
+            self.assertEqual(snap_idle.watching_game, "")
+
+            camp_a = DropsCampaign(
+                worker,
+                _make_campaign_payload(cid="camp_a", name="Camp A", game_id="10", game_name="GameA", required_minutes=10),
+                {},
+            )
+            camp_b = DropsCampaign(
+                worker,
+                _make_campaign_payload(cid="camp_b", name="Camp B", game_id="10", game_name="GameA", required_minutes=60),
+                {},
+            )
+            worker.inventory = [camp_a, camp_b]
+            worker.wanted_games = [camp_a.game]
+            ch = Channel(worker, id=501, login="streamer_a", display_name="StreamerA")
+            ch._stream = Stream(ch, id=50101, game={"id": "10", "name": "GameA"}, viewers=100, title="live")
+            ch._stream.drops_enabled = True
+            ch.available_campaign_ids = {"camp_b"}
+            worker.watching_channel.set(ch)
+
+            active = worker.get_active_campaign(ch)
+            self.assertIsNotNone(active)
+            assert active is not None
+            self.assertEqual(active.id, "camp_b")
+
+            snap_watch = worker.snapshot()
+            self.assertEqual(snap_watch.watching_channel, "StreamerA")
+            self.assertEqual(snap_watch.watching_game, "GameA")
+
+            # Verify WebSocket reconnect resets stale _max_pong inside _handle() so _handle_ping does not loop
+            pool = WebsocketPool(worker)
+            ws = Websocket(pool, 0)
+            ws._next_ping = now_ts() + 120.0
+            ws._max_pong = now_ts() - 30.0
+            worker._auth_state._logged_in.set()
+
+            async def fake_backoff_connect(_url, **_kw):
+                yield MagicMock()
+
+            async def fake_handle_recv():
+                ws._closed.set()
+                ws.request_reconnect()
+
+            ws._backoff_connect = fake_backoff_connect  # type: ignore[method-assign]
+            ws._handle_topics = AsyncMock()  # type: ignore[method-assign]
+            ws._handle_recv = fake_handle_recv  # type: ignore[method-assign]
+            ws.send = AsyncMock()  # type: ignore[method-assign]
+            await ws._handle()
+            ws.send.assert_called_with({"type": "PING"})
+            self.assertGreater(ws._max_pong, now_ts() - 5.0)
+
+        asyncio.run(run())
+
+    def test_all_campaigns_preset_prioritizes_in_progress_over_zero_percent(self) -> None:
+        self.gs.radar_preset = "all_campaigns"
+        self.gs.priority_mode = "ENDING_SOONEST"
+        self.gs.priority_games = ["ZeroGame", "StartedGame"]
+
+        worker = self._make_worker("prio_all_acc")
+        zero_camp = DropsCampaign(
+            worker,
+            _make_campaign_payload(
+                cid="camp_zero",
+                name="Zero Camp",
+                game_id="1",
+                game_name="ZeroGame",
+                required_minutes=120,
+            ),
+            {},
+        )
+        started_camp = DropsCampaign(
+            worker,
+            _make_campaign_payload(
+                cid="camp_started",
+                name="Started Camp",
+                game_id="2",
+                game_name="StartedGame",
+                required_minutes=30,
+            ),
+            {},
+        )
+        list(started_camp.drops)[0].real_current_minutes = 29
+        worker.inventory = [zero_camp, started_camp]
+        worker._compute_wanted_games()
+        self.assertEqual([g.name for g in worker.wanted_games], ["StartedGame", "ZeroGame"])
+
+    def test_json_legacy_cookies_jar_compat_and_no_dpapi_leak(self) -> None:
+        import json
+        import aiohttp
+        from yarl import URL
+        from auth_transport import load_auth_token_from_jar, load_cookie_jar_compat, save_cookie_jar_protected
+
+        url = URL("https://android.tv.twitch.tv")
+        raw = "legacy_json_tok_999"
+
+        async def run() -> None:
+            worker = self._make_worker("json_cookie_acc")
+            worker.cookies_path.parent.mkdir(parents=True, exist_ok=True)
+            worker.cookies_path.write_text(
+                json.dumps(
+                    {
+                        "android.tv.twitch.tv|": {
+                            "auth-token": {
+                                "key": "auth-token",
+                                "value": raw,
+                                "domain": "android.tv.twitch.tv",
+                                "path": "/",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            jar1 = aiohttp.CookieJar()
+            self.assertTrue(load_cookie_jar_compat(jar1, worker.cookies_path, url))
+            self.assertEqual(jar1.filter_cookies(url)["auth-token"].value, raw)
+
+            jar2 = aiohttp.CookieJar()
+            loaded = load_auth_token_from_jar(jar2, worker.cookies_path, url)
+            self.assertEqual(loaded, raw)
+            self.assertEqual(jar2.filter_cookies(url)["auth-token"].value, raw)
+            self.assertNotIn(raw.encode("utf8"), worker.cookies_path.read_bytes())
+
+            # Re-save via save_cookie_jar_protected and ensure get_session() decrypts in memory
+            save_cookie_jar_protected(jar2, worker.cookies_path, url, raw)
+            session = await worker.get_session()
+            try:
+                mem_val = session.cookie_jar.filter_cookies(url)["auth-token"].value
+                self.assertEqual(mem_val, raw)
+                self.assertFalse(mem_val.startswith("dpapi:"))
+            finally:
+                await session.close()
+                worker._session = None
+
+        asyncio.run(run())
+
+    def test_sync_progress_uses_refreshed_campaign_after_fetch_inventory(self) -> None:
+        async def run() -> None:
+            worker = self._make_worker("refresh_acc")
+            payload = _make_campaign_payload(
+                cid="camp_refresh",
+                name="Refresh Drops",
+                game_id="9004",
+                game_name="RefreshGame",
+                required_minutes=60,
+            )
+            camp_old = DropsCampaign(worker, payload, {})
+            worker.inventory = [camp_old]
+            worker._campaigns = {"camp_refresh": camp_old}
+            worker._drops = {d.id: d for d in camp_old.drops}
+            worker.wanted_games = [camp_old.game]
+
+            ch = Channel(worker, id=808, login="refresh_ch", display_name="RefreshCh")
+            ch._stream = Stream(
+                ch,
+                id=80801,
+                title="Live Drops",
+                game={"id": "9004", "name": "RefreshGame"},
+                viewers=250,
+            )
+            ch._stream.drops_enabled = True
+            worker.channels[808] = ch
+            worker.watching_channel.set(ch)
+
+            async def fake_empty_session(op):
+                return {"data": {"currentUser": {"dropCurrentSession": {"dropID": "", "currentMinutesWatched": 0}}}}
+
+            async def fake_fetch_inv_replaces_objects(*, lightweight: bool = False):
+                camp_new = DropsCampaign(worker, payload, {})
+                for d in camp_new.drops:
+                    d.real_current_minutes = 5
+                worker.inventory = [camp_new]
+                worker._campaigns = {"camp_refresh": camp_new}
+                worker._drops = {d.id: d for d in camp_new.drops}
+
+            worker.gql_request = fake_empty_session  # type: ignore[method-assign]
+            worker.fetch_inventory = fake_fetch_inv_replaces_objects  # type: ignore[method-assign]
+
+            for _ in range(5):
+                await worker._sync_active_drop_progress(ch, watch_ok=True)
+
+            # Channel must NOT be kicked because refreshed inventory shows +5 real minutes
+            self.assertIs(worker.watching_channel.get_with_default(None), ch)
+            self.assertTrue(worker.can_watch(ch))
+            self.assertEqual(list(worker._campaigns["camp_refresh"].drops)[0].real_current_minutes, 5)
+
+        asyncio.run(run())
+
+    def test_special_events_exclusive_campaign_rejects_unrelated_channels_and_uses_verified_game_and_pinned(self) -> None:
+        from radar import PinnedStreamerStatus, SharedCampaignRadar
+
+        async def run() -> None:
+            cache_file = self.tmp_path / "radar_special_cache.json"
+            radar1 = SharedCampaignRadar(self.gs, cache_path=cache_file)
+            worker = AccountWorker(
+                AccountProfileConfig.load("special_acc", self.profiles_dir),
+                self.gs,
+                radar1,
+                profiles_dir=self.profiles_dir,
+            )
+            payload_gtavi = _make_campaign_payload(
+                cid="camp_gtavi",
+                name="GTAVI Launch Celebration",
+                game_id="509663",
+                game_name="Special Events",
+                required_minutes=60,
+            )
+            camp_gtavi = DropsCampaign(worker, payload_gtavi, {})
+            worker.inventory = [camp_gtavi]
+            worker._campaigns = {"camp_gtavi": camp_gtavi}
+            worker._drops = {d.id: d for d in camp_gtavi.drops}
+            self.gs.exclusive_campaign_id = "camp_gtavi"
+
+            # Record live sighting of GTAVI Launch Celebration in Grand Theft Auto VI category
+            await radar1.ingest_channel_campaigns(
+                worker,
+                [payload_gtavi],
+                channel_id=220476955,
+                channel_login="ishowspeed",
+                channel_game={"id": "1867279146", "name": "Grand Theft Auto VI", "slug": "grand-theft-auto-vi"},
+            )
+            # Configure pinned streamers: ishowspeed has camp_gtavi, other_pinned has nothing
+            radar1.pinned_streams["ishowspeed"] = PinnedStreamerStatus(
+                login="ishowspeed",
+                channel_id=220476955,
+                display_name="IShowSpeed",
+                online=True,
+                viewers=50000,
+                active_campaign_ids=["camp_gtavi"],
+                raw_channel_data={
+                    "stream": {"id": "22047695501", "viewersCount": 50000},
+                    "broadcastSettings": {
+                        "title": "GTAVI!",
+                        "game": {"id": "1867279146", "name": "Grand Theft Auto VI"},
+                    },
+                },
+            )
+            radar1.pinned_streams["other_pinned"] = PinnedStreamerStatus(
+                login="other_pinned",
+                channel_id=999001,
+                display_name="OtherPinned",
+                online=True,
+                viewers=80000,
+                active_campaign_ids=[],
+                raw_channel_data={
+                    "stream": {"id": "99900101", "viewersCount": 80000},
+                    "broadcastSettings": {
+                        "title": "Just Chatting",
+                        "game": {"id": "509658", "name": "Just Chatting"},
+                    },
+                },
+            )
+
+            queried_games: list[str] = []
+
+            async def fake_get_live_streams(game: Game, *, limit: int = 20, drops_enabled: bool = True):
+                queried_games.append(game.name)
+                if game.name == "Special Events":
+                    ch_olive = Channel(worker, id=516509385, login="olivescrossing", display_name="OlivesCrossing")
+                    ch_olive._stream = Stream(
+                        ch_olive,
+                        id=51650938501,
+                        title="KITTY HBD",
+                        game={"id": "509663", "name": "Special Events"},
+                        viewers=150,
+                    )
+                    ch_olive._stream.drops_enabled = True
+                    return [ch_olive]
+                if game.name == "Grand Theft Auto VI":
+                    ch_dz = Channel(worker, id=85039743, login="mrdzinold", display_name="mrdzinold")
+                    ch_dz._stream = Stream(
+                        ch_dz,
+                        id=8503974301,
+                        title="GTAVI Drops",
+                        game={"id": "1867279146", "name": "Grand Theft Auto VI"},
+                        viewers=12000,
+                    )
+                    ch_dz._stream.drops_enabled = True
+                    return [ch_dz]
+                return []
+
+            async def fake_gql_request(ops):
+                op_list = ops if isinstance(ops, list) else [ops]
+                results = []
+                for op in op_list:
+                    cid = str((op.get("variables") or {}).get("channelID") or "")
+                    if cid == "516509385":
+                        results.append(
+                            {
+                                "data": {
+                                    "channel": {
+                                        "id": cid,
+                                        "viewerDropCampaigns": [{"id": "b1bfcba7-other", "name": "KITTY HBD 2026"}],
+                                    }
+                                }
+                            }
+                        )
+                    elif cid == "85039743":
+                        results.append(
+                            {
+                                "data": {
+                                    "channel": {
+                                        "id": cid,
+                                        "viewerDropCampaigns": [{"id": "camp_gtavi", "name": "GTAVI Launch Celebration"}],
+                                    }
+                                }
+                            }
+                        )
+                    else:
+                        results.append({"data": {"channel": {"id": cid, "viewerDropCampaigns": []}}})
+                return results if isinstance(ops, list) else results[0]
+
+            worker.get_live_streams = fake_get_live_streams  # type: ignore[method-assign]
+            worker.gql_request = fake_gql_request  # type: ignore[method-assign]
+
+            worker._compute_wanted_games()
+            await worker._fetch_channels()
+            worker._switch_channel()
+
+            self.assertIn("Grand Theft Auto VI", queried_games)
+            self.assertIn("Special Events", queried_games)
+            self.assertNotIn(999001, worker.channels)
+
+            olive_ch = worker.channels[516509385]
+            self.assertTrue(olive_ch.drops_verified)
+            self.assertFalse(worker.can_watch(olive_ch))
+
+            dz_ch = worker.channels[85039743]
+            self.assertTrue(worker.can_watch(dz_ch))
+
+            speed_ch = worker.channels[220476955]
+            self.assertTrue(worker.can_watch(speed_ch))
+
+            self.assertIs(worker.watching_channel.get_with_default(None), speed_ch)
+            active = worker.get_active_campaign()
+            self.assertIsNotNone(active)
+            assert active is not None
+            self.assertEqual(active.id, "camp_gtavi")
+
+            # Verify verified_campaign_games persists across radar cache reloads
+            radar1._save_disk_cache()
+            radar2 = SharedCampaignRadar(self.gs, cache_path=cache_file)
+            reloaded_games = [g.name for g in radar2.get_verified_campaign_games("camp_gtavi")]
+            self.assertIn("Grand Theft Auto VI", reloaded_games)
 
         asyncio.run(run())
 

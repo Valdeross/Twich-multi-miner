@@ -5,6 +5,7 @@ import asyncio
 import base64
 import getpass
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -140,6 +141,7 @@ def save_cookie_jar_protected(
     raw_token: str = "",
 ) -> None:
     """Persist cookies.jar using public CookieJar APIs with auth-token encrypted on disk."""
+    www_url = URL("https://www.twitch.tv")
     token_to_protect = str(raw_token or "").strip()
     if not token_to_protect:
         morsel = jar.filter_cookies(client_url).get("auth-token")
@@ -147,10 +149,69 @@ def save_cookie_jar_protected(
             token_to_protect = unprotect_secret(morsel.value)
 
     if token_to_protect:
-        jar.update_cookies({"auth-token": protect_secret(token_to_protect)}, client_url)
+        protected = protect_secret(token_to_protect)
+        jar.update_cookies({"auth-token": protected}, client_url)
+        if jar.filter_cookies(www_url).get("auth-token") is not None:
+            jar.update_cookies({"auth-token": protected}, www_url)
 
     cookies_path.parent.mkdir(parents=True, exist_ok=True)
-    jar.save(cookies_path)
+    try:
+        jar.save(cookies_path)
+    finally:
+        # Restore plaintext auth-token in memory so HTTP requests never send dpapi:... ciphertext
+        if token_to_protect:
+            jar.update_cookies({"auth-token": token_to_protect}, client_url)
+            jar.update_cookies({"auth-token": token_to_protect}, www_url)
+
+
+def load_cookie_jar_compat(
+    jar: aiohttp.CookieJar,
+    cookies_path: Path,
+    client_url: URL,
+) -> bool:
+    """Load pickle or legacy TwitchDropsMiner JSON cookies.jar and decrypt auth-token in memory."""
+    if not cookies_path.is_file():
+        return False
+    loaded = False
+    try:
+        jar.load(cookies_path)
+        loaded = True
+    except Exception:
+        jar.clear()
+        with suppress(Exception):
+            raw_json = json.loads(cookies_path.read_text(encoding="utf-8"))
+            if isinstance(raw_json, dict):
+                for domain_key, cookie_map in raw_json.items():
+                    if not isinstance(cookie_map, dict):
+                        continue
+                    host_part = str(domain_key).split("|", 1)[0].lstrip(".").strip()
+                    for name, entry in cookie_map.items():
+                        if isinstance(entry, dict):
+                            val = entry.get("value")
+                            dom = str(entry.get("domain") or host_part).lstrip(".").strip()
+                        else:
+                            val = entry
+                            dom = host_part
+                        if val is None or val == "" or not dom:
+                            continue
+                        jar.update_cookies({str(name): str(val)}, URL(f"https://{dom}/"))
+                        loaded = True
+    if not loaded:
+        return False
+
+    morsel = jar.filter_cookies(client_url).get("auth-token")
+    if morsel is not None and morsel.value:
+        stored_val = str(morsel.value).strip()
+        is_protected = stored_val.startswith(_PROTECTED_PREFIXES)
+        setattr(jar, "_token_protected_on_disk", is_protected)
+        if is_protected:
+            raw_token = unprotect_secret(stored_val)
+            if raw_token:
+                jar.update_cookies({"auth-token": raw_token}, client_url)
+                jar.update_cookies({"auth-token": raw_token}, URL("https://www.twitch.tv"))
+    else:
+        setattr(jar, "_token_protected_on_disk", False)
+    return True
 
 
 def load_auth_token_from_jar(
@@ -158,21 +219,26 @@ def load_auth_token_from_jar(
     cookies_path: Path,
     client_url: URL,
 ) -> str:
-    """Load and decrypt auth-token via public CookieJar APIs, upgrading legacy plaintext files."""
+    """Load and decrypt auth-token via public CookieJar APIs, upgrading legacy plaintext/JSON files."""
     morsel = jar.filter_cookies(client_url).get("auth-token")
     if (morsel is None or not morsel.value) and cookies_path.is_file():
-        with suppress(Exception):
-            jar.load(cookies_path)
-            morsel = jar.filter_cookies(client_url).get("auth-token")
+        load_cookie_jar_compat(jar, cookies_path, client_url)
+        morsel = jar.filter_cookies(client_url).get("auth-token")
 
     if morsel is None or not morsel.value:
         return ""
 
     stored_val = str(morsel.value).strip()
     raw_token = unprotect_secret(stored_val)
-    if raw_token and not stored_val.startswith(_PROTECTED_PREFIXES) and cookies_path.exists():
-        with suppress(Exception):
-            save_cookie_jar_protected(jar, cookies_path, client_url, raw_token)
+    if raw_token:
+        protected_on_disk = bool(getattr(jar, "_token_protected_on_disk", False))
+        if (not stored_val.startswith(_PROTECTED_PREFIXES) and not protected_on_disk) and cookies_path.exists():
+            with suppress(Exception):
+                save_cookie_jar_protected(jar, cookies_path, client_url, raw_token)
+                setattr(jar, "_token_protected_on_disk", True)
+        else:
+            jar.update_cookies({"auth-token": raw_token}, client_url)
+            jar.update_cookies({"auth-token": raw_token}, URL("https://www.twitch.tv"))
     return raw_token
 
 
@@ -425,6 +491,7 @@ class WorkerAuthState:
                         self.access_token = ""
                         if client_info.CLIENT_URL.host is not None:
                             jar.clear_domain(client_info.CLIENT_URL.host)
+                        jar.clear_domain("www.twitch.tv")
                         self._worker.cookies_path.unlink(missing_ok=True)
                         continue
                     if response.status == 200:
@@ -450,7 +517,9 @@ class WorkerAuthState:
         self._worker.config.username = self.username
         self._worker.config.save(self._worker.profiles_dir)
 
-        jar.update_cookies({"persistent": str(self.user_id)}, client_info.CLIENT_URL)
+        persistent_cookie = {"persistent": str(self.user_id)}
+        jar.update_cookies(persistent_cookie, client_info.CLIENT_URL)
+        jar.update_cookies(persistent_cookie, URL("https://www.twitch.tv"))
         save_cookie_jar_protected(
             jar, self._worker.cookies_path, client_info.CLIENT_URL, self.access_token
         )
@@ -477,8 +546,9 @@ class WorkerTransportMixin:
             return self._session  # type: ignore[attr-defined]
         cookie_jar = aiohttp.CookieJar()
         try:
-            if self.cookies_path.exists():  # type: ignore[attr-defined]
-                cookie_jar.load(self.cookies_path)  # type: ignore[attr-defined]
+            load_cookie_jar_compat(
+                cookie_jar, self.cookies_path, self._client_type.CLIENT_URL  # type: ignore[attr-defined]
+            )
         except Exception:
             cookie_jar.clear()
 

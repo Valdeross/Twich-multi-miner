@@ -174,6 +174,7 @@ class Channel:
         "_pending_stream_up",
         "acl_based",
         "pinned",
+        "drops_verified",
         "available_campaign_ids",
     )
 
@@ -196,6 +197,7 @@ class Channel:
         self._pending_stream_up: asyncio.Task[Any] | None = None
         self.acl_based: bool = acl_based
         self.pinned: bool = pinned
+        self.drops_verified: bool = False
         self.available_campaign_ids: set[str] = set()
 
     @classmethod
@@ -312,6 +314,7 @@ class Channel:
         return spade_url
 
     def _check_drops_enabled(self, available_drops: list[JsonType]) -> bool:
+        self.drops_verified = True
         self.available_campaign_ids = {
             cid for item in available_drops if isinstance(item, dict) and (cid := item.get("id"))
         }
@@ -367,7 +370,11 @@ class Channel:
                 stream.drops_enabled = has_available
             if raw_avail:
                 await self._worker.radar.ingest_channel_campaigns(
-                    self._worker, raw_avail, channel_id=self.id, channel_login=self._login
+                    self._worker,
+                    raw_avail,
+                    channel_id=self.id,
+                    channel_login=self._login,
+                    channel_game=(channel_data.get("broadcastSettings") or {}).get("game"),
                 )
         return stream
 
@@ -396,7 +403,7 @@ class Channel:
             self._worker.on_channel_update(self, old_stream, self._stream)
 
     async def send_watch(self) -> bool:
-        """Fetch playlist and HEAD only the latest HLS chunk; auto-reset token URL on 4xx."""
+        """Fetch media playlist and send HEAD to every HLS chunk; auto-reset token URL on non-200."""
         if self._stream is None:
             return False
         stream_url = await self._stream.get_stream_url()
@@ -436,16 +443,16 @@ class Channel:
             self._stream.invalidate_stream_url()
             return False
 
-        # Sending HEAD only to the newest chunk cuts CDN requests by ~15x per cycle
-        latest_chunk_url = chunks_list[-1]
-        try:
-            async with self._worker.request("HEAD", latest_chunk_url) as head_response:
-                if head_response.status != 200:
-                    self._stream.invalidate_stream_url()
-                    return False
-        except RequestException:
-            self._stream.invalidate_stream_url()
-            return False
+        # Twitch requires HEAD requests across all playlist segments (~15 chunks) to credit watch minutes
+        for chunk_url in chunks_list:
+            try:
+                async with self._worker.request("HEAD", chunk_url) as head_response:
+                    if head_response.status != 200:
+                        self._stream.invalidate_stream_url()
+                        return False
+            except RequestException:
+                self._stream.invalidate_stream_url()
+                return False
         return True
 
     async def _send_watch_spade(self) -> bool:

@@ -91,6 +91,7 @@ class AccountSnapshot:
     ws_connected: int
     ws_total: int
     last_error: str
+    is_authenticated: bool = False
     drop_image_url: str = ""
     game_image_url: str = ""
     log_tail: list[str] = field(default_factory=list)
@@ -147,7 +148,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self.watching_channel: AwaitableValue[Channel] = AwaitableValue()
         self.is_standby: bool = False
         self.claimed_count: int = 0
-        self._claimed_drop_ids: set[str] = set()
+        self._claimed_drop_ids: set[str] = set(getattr(config, "claimed_drop_ids", ()) or ())
         self._stalled_channels: dict[int, float] = {}
         self._zero_progress_streak: int = 0
         self._zero_progress_channel_id: int | None = None
@@ -162,6 +163,18 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self._mnt_task: asyncio.Task[None] | None = None
         self._file_handler: logging.FileHandler | None = None
         self._file_logger: logging.Logger | None = None
+        self._seed_legacy_claimed_ids()
+
+    def _seed_legacy_claimed_ids(self) -> None:
+        fragpunk_molotov_id = "d6294b7d-c7a5-11f1-8149-0a58a9feac02"
+        if fragpunk_molotov_id in self._claimed_drop_ids:
+            return
+        if self.log_path.is_file():
+            with suppress(OSError):
+                if "FragPunk — Molotov Cocktail" in self.log_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                ):
+                    self.remember_claimed_drop_id(fragpunk_molotov_id)
 
     def _t(self, key: str, **kwargs: Any) -> str:
         return tr(key, getattr(self.global_settings, "language", "ru"), **kwargs)
@@ -227,12 +240,25 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         self.log(self._t("log_critical_restart", error=exc), level=logging.ERROR)
         self.change_state(State.RESTART)
 
+    def remember_claimed_drop_id(self, drop_id: str) -> None:
+        clean_id = str(drop_id or "").strip()
+        if not clean_id:
+            return
+        changed = clean_id not in self._claimed_drop_ids
+        self._claimed_drop_ids.add(clean_id)
+        if clean_id not in self.config.claimed_drop_ids:
+            self.config.claimed_drop_ids = [*self.config.claimed_drop_ids, clean_id][-500:]
+            changed = True
+        if changed:
+            with suppress(Exception):
+                self.config.save(self.profiles_dir)
+
     def record_claimed_drop(self, drop: Any) -> None:
         drop_id = str(getattr(drop, "id", "") or "")
         if drop_id:
             if drop_id in self._claimed_drop_ids:
                 return
-            self._claimed_drop_ids.add(drop_id)
+            self.remember_claimed_drop_id(drop_id)
         self.claimed_count += 1
         rec = ClaimedDropRecord(
             timestamp_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -339,8 +365,6 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             ch.remove()
         self._drops.clear()
         self.channels.clear()
-        self.inventory.clear()
-        self._campaigns.clear()
         self._auth_state.clear()
         self.wanted_games.clear()
         self._mnt_triggers.clear()
@@ -497,6 +521,8 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
 
     def watch(self, channel: Channel, *, standby: bool = False, update_status: bool = True) -> None:
         self.is_standby = standby
+        self._zero_progress_streak = 0
+        self._zero_progress_channel_id = channel.id
         self.watching_channel.set(channel)
         if update_status:
             if standby:
@@ -537,14 +563,19 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
     async def _watch_loop(self) -> NoReturn:
         last_spade_ts = 0.0
         last_gql_sync_ts = 0.0
+        last_channel_id: int | None = None
         while not self._stop_event.is_set():
             channel = await self.watching_channel.get()
             if not channel.online:
                 self.stop_watching()
                 self.change_state(State.CHANNEL_SWITCH)
                 continue
+            if channel.id != last_channel_id:
+                last_channel_id = channel.id
+                last_gql_sync_ts = time()
 
             now = time()
+            last_sent = now
             send_spade = self.global_settings.hybrid_watch_spade and (
                 now - last_spade_ts >= SPADE_INTERVAL_SECONDS
             )
@@ -554,7 +585,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             if not succeeded:
                 logger.log(CALL, f"[{self.name}] Watch pulse warning on {channel.name}")
 
-            await asyncio.sleep(10)
+            await asyncio.sleep(max(1.0, 10.0 - (time() - last_sent)))
             if self._stop_event.is_set():
                 break
 
@@ -564,7 +595,37 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
                 await self._sync_active_drop_progress(channel, watch_ok=succeeded)
 
             interval = random.uniform(WATCH_INTERVAL_MIN, WATCH_INTERVAL_MAX)
-            await self._watch_sleep(max(1.0, interval - 10.0))
+            await self._watch_sleep(max(1.0, interval - (time() - last_sent)))
+
+    async def _verify_resync_or_switch(
+        self, channel: Channel, campaign: DropsCampaign, *, gql_ok: bool
+    ) -> bool:
+        """Verify progress via lightweight Inventory sync after 5 unconfirmed minutes; switch if stalled."""
+        camp_id = campaign.id
+        prev_mins = sum(d.real_current_minutes for d in campaign.drops)
+        for d in campaign.drops:
+            d.reset_unconfirmed()
+        try:
+            await self.fetch_inventory(lightweight=True)
+        except MinerException:
+            pass
+        refreshed = self._campaigns.get(camp_id)
+        if refreshed is None or refreshed.finished:
+            return False
+        after_mins = sum(d.real_current_minutes for d in refreshed.drops)
+        if after_mins <= prev_mins and gql_ok:
+            for d in refreshed.drops:
+                d.extra_current_minutes = 0
+            self.notify_ui_update()
+            self._stalled_channels[channel.id] = time() + 900.0
+            self._zero_progress_streak = 0
+            self.log(
+                f"На канале {channel.name} прогресс дропса не начисляется — переключаюсь на другой канал."
+            )
+            self.stop_watching()
+            self.change_state(State.CHANNEL_SWITCH)
+            return True
+        return False
 
     async def _sync_active_drop_progress(self, channel: Channel, *, watch_ok: bool = True) -> None:
         drop_data: JsonType | None = None
@@ -584,21 +645,35 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
                 self._zero_progress_streak = 0
                 self._zero_progress_channel_id = channel.id
                 mins = int(drop_data.get("currentMinutesWatched") or 0)
-                drop.update_minutes(mins)
-                if drop.ready_to_claim:
-                    await drop.ensure_claim()
+                if mins > drop.real_current_minutes:
+                    drop.update_minutes(mins)
+                elif watch_ok and drop.campaign.bump_minutes(channel):
+                    if await self._verify_resync_or_switch(channel, drop.campaign, gql_ok=gql_ok):
+                        return
+                refreshed_drop = self._drops.get(drop.id) or drop
+                if refreshed_drop.ready_to_claim:
+                    await refreshed_drop.ensure_claim()
                     self.change_state(State.INVENTORY_FETCH)
                 return
 
-        # If CurrentDrop GQL succeeded with empty dropID repeatedly while watch pulses succeeded
-        # (e.g. sub-only drop or channel stopped crediting drops), switch to another channel.
-        if watch_ok and gql_ok:
+        if not watch_ok:
+            return
+
+        # Advance local progress (+1 min) while watching even if CurrentDrop returns empty/lagging,
+        # then verify via Inventory after UNCONFIRMED_SYNC_THRESHOLD (5 min) before kicking the channel.
+        active_campaign = self.get_active_campaign(channel)
+        if active_campaign is not None:
+            if active_campaign.bump_minutes(channel):
+                await self._verify_resync_or_switch(channel, active_campaign, gql_ok=gql_ok)
+            return
+
+        if gql_ok:
             if self._zero_progress_channel_id != channel.id:
                 self._zero_progress_channel_id = channel.id
                 self._zero_progress_streak = 1
             else:
                 self._zero_progress_streak += 1
-            if self._zero_progress_streak >= 3:
+            if self._zero_progress_streak >= 5:
                 self._stalled_channels[channel.id] = time() + 900.0
                 self._zero_progress_streak = 0
                 self.log(
@@ -606,20 +681,6 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
                 )
                 self.stop_watching()
                 self.change_state(State.CHANNEL_SWITCH)
-            return
-
-        # Only estimate +1 local minute when the watch pulse succeeded AND CurrentDrop GQL itself failed;
-        # otherwise wait for real Twitch progress instead of inflating local minutes that later roll back.
-        if watch_ok and not gql_ok:
-            if (active_campaign := self.get_active_campaign(channel)) is not None:
-                needs_resync = active_campaign.bump_minutes(channel)
-                if needs_resync:
-                    for d in active_campaign.drops:
-                        d.reset_unconfirmed()
-                    try:
-                        await self.fetch_inventory(lightweight=True)
-                    except MinerException:
-                        pass
 
     @task_wrapper(critical=True)
     async def _maintenance_task(self) -> None:
@@ -708,6 +769,9 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         if not lightweight:
             await self.radar.poll_pinned_streamers(self)
         public_campaigns = await self.radar.get_merged_public_campaigns(proxy_url=self.proxy_url)
+        if not public_campaigns and not lightweight:
+            await self.radar.discover_from_game_directories(self)
+            public_campaigns = await self.radar.get_merged_public_campaigns(proxy_url=self.proxy_url)
         inventory_data = self._merge_data(inventory_data, public_campaigns)
 
         for c_data in inventory_data.values():
@@ -790,19 +854,23 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
         if msg_type == "drop-claim":
             if drop is None:
                 return
-            drop.update_claim(data["drop_instance_id"])
+            self._zero_progress_streak = 0
+            claim_id = data.get("drop_instance_id")
+            if claim_id:
+                drop.update_claim(claim_id)
             campaign = drop.campaign
-            await drop.claim()
+            await drop.ensure_claim()
             await asyncio.sleep(4)
             if watching is not None:
-                for _ in range(6):
-                    ctx = await self.gql_request(
-                        GQL_QUERIES["CurrentDrop"].with_variables({"channelID": str(watching.id)})
-                    )
-                    cur = (ctx.get("data") or {}).get("currentUser", {}).get("dropCurrentSession")
-                    if cur is None or cur.get("dropID") != drop.id:
-                        break
-                    await asyncio.sleep(2)
+                with suppress(MinerException):
+                    for _ in range(6):
+                        ctx = await self.gql_request(
+                            GQL_QUERIES["CurrentDrop"].with_variables({"channelID": str(watching.id)})
+                        )
+                        cur = (ctx.get("data") or {}).get("currentUser", {}).get("dropCurrentSession")
+                        if cur is None or cur.get("dropID") != drop.id:
+                            break
+                        await asyncio.sleep(2)
             if campaign.can_earn(watching):
                 self.restart_watching()
             else:
@@ -810,6 +878,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             return
 
         if drop is not None and drop.can_earn(watching):
+            self._zero_progress_streak = 0
             cur_min = int(data.get("current_progress_min") or 0)
             drop.update_minutes(cur_min)
             if drop.ready_to_claim:
@@ -860,8 +929,8 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             verification_uri=self._auth_state.verification_uri,
             status_text=self.status_text,
             is_standby=self.is_standby,
-            watching_channel=watching.name if watching else "—",
-            watching_game=str(watching.game) if (watching and watching.game) else "—",
+            watching_channel=watching.name if watching else "",
+            watching_game=str(watching.game) if (watching and watching.game) else "",
             watching_viewers=(watching.viewers or 0) if watching else 0,
             campaign_name=active_campaign.name if active_campaign else ("Standby Radar" if self.is_standby else "—"),
             drop_name=active_drop.rewards_text() if active_drop else "—",
@@ -874,6 +943,7 @@ class AccountWorker(WorkerTransportMixin, ChannelSelectorMixin):
             ws_connected=ws_conn,
             ws_total=ws_tot,
             last_error=self.last_error,
+            is_authenticated=self.is_authenticated,
             drop_image_url=active_drop.primary_image_url if active_drop else "",
             game_image_url=str(active_campaign.image_url) if active_campaign else "",
             log_tail=list(self.log_buffer),

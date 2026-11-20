@@ -2389,14 +2389,18 @@
         if (!acc.running) {
           return { tone: "", label: "Остановлен" };
         }
-        if (acc.auth_status === "waiting") {
+        if (acc.auth_status === "waiting" || (acc.is_authenticated === false && !acc.username)) {
           return { tone: "warn", label: "Вход..." };
         }
         if (acc.is_standby) {
           return { tone: "info", label: "Стендбай" };
         }
-        if (acc.watching_channel) {
+        if (acc.watching_channel && acc.watching_channel !== "—") {
           return { tone: "ok", label: "Добыча" };
+        }
+        const st = String(acc.status_text || "");
+        if (st.startsWith("Доступных наград нет") || st.startsWith("No available drops")) {
+          return { tone: "warn", label: "Нет наград" };
         }
         return { tone: "info", label: "Поиск" };
       }
@@ -2419,7 +2423,7 @@
         const history = data.claimed_history || [];
 
         const runningCount = accounts.filter((a) => a.running).length;
-        const miningCount = accounts.filter((a) => a.running && a.watching_channel && !a.is_standby).length;
+        const miningCount = accounts.filter((a) => a.running && a.watching_channel && a.watching_channel !== "—" && !a.is_standby).length;
         const standbyCount = accounts.filter((a) => a.running && a.is_standby).length;
         const needAuthCount = accounts.filter((a) => a.auth_status === "code_ready" || a.activation_code).length;
         const claimedSum = Math.max(
@@ -2491,6 +2495,7 @@
             a.name,
             a.username,
             a.running,
+            a.is_authenticated,
             a.auth_status,
             a.activation_code,
             a.status_text,
@@ -2548,12 +2553,14 @@
             const subIdentity = acc.username ? "@" + acc.username : "Не авторизован";
             const proxyTag = acc.proxy ? `<span class="tag">Прокси</span>` : "";
 
-            let streamMain = acc.watching_channel || (acc.running ? acc.status_text : "Воркер остановлен");
-            let streamSub = acc.watching_game
+            const hasWatching = Boolean(acc.watching_channel && acc.watching_channel !== "—");
+            const hasGame = Boolean(acc.watching_game && acc.watching_game !== "—");
+            let streamMain = hasWatching ? acc.watching_channel : (acc.running ? acc.status_text : "Воркер остановлен");
+            let streamSub = hasGame
               ? `${acc.watching_game}${acc.watching_viewers ? " · " + acc.watching_viewers + " зр." : ""}`
               : acc.activation_code
               ? "Ожидает ввода кода в браузере"
-              : acc.last_error || "Готов к запуску";
+              : acc.last_error || (acc.running ? "Ожидание канала" : "Готов к запуску");
 
             const pct = Math.max(0, Math.min(100, Math.round(acc.progress_pct || 0)));
             const minsLabel =
